@@ -259,19 +259,26 @@ async def on_startup(app):
 
 
 if __name__ == '__main__':
-application = ApplicationBuilder().token(BOT_TOKEN).build()
+    # создаём приложение и регистрируем хук запуска планировщика
+    application = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .post_init(on_startup)           # <-- здесь регистрируем ваш on_startup
+        .build()
+    )
 
+    # Регистрируем все хендлеры
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_cmd))
+    application.add_handler(CommandHandler("add", add_reminder))
+    application.add_handler(CommandHandler("list", list_reminders))
+    application.add_handler(CommandHandler("delete", delete_reminder))
+    application.add_handler(CommandHandler("adduser", add_user))
+    application.add_handler(CommandHandler("removeuser", remove_user))
 
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("help", help_cmd))
-application.add_handler(CommandHandler("add", add_reminder))
-application.add_handler(CommandHandler("list", list_reminders))
-application.add_handler(CommandHandler("delete", delete_reminder))
-application.add_handler(CommandHandler("adduser", add_user))
-application.add_handler(CommandHandler("removeuser", remove_user))
+    # Запускаем long-polling
+    application.run_polling(stop_signals=())
 
-
-application.run_polling(stop_signals=())
 
 
 
