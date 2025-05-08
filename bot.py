@@ -258,13 +258,10 @@ async def on_startup(app):
         load_jobs()
 
 
-if __name__ == "__main__":
-    application = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .post_init(on_startup)
-        .build()
-    )
+if __name__ == '__main__':
+    application = ApplicationBuilder().token(TOKEN).build()
+    
+
 
     
     application.add_handler(CommandHandler("start", start))
@@ -275,22 +272,8 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("adduser", add_user))
     application.add_handler(CommandHandler("removeuser", remove_user))
 
-    
-    def shutdown(signum, frame):
-        logger.info("Получен сигнал остановки, останавливаем бот…")
-        application.stop()
-    signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
-
-    
-    while True:
-        try:
-            logger.info("Запускаем polling()…")
-            application.run_polling()
-            logger.warning("run_polling() завершился, перезапуск через 5 сек…")
-        except Exception:
-            logger.exception("Ошибка в боте, перезапуск через 5 сек…")
-        time.sleep(5)
+    application.run_polling(stop_signals=())
+ 
 
 
 
