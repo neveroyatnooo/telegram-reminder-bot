@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
 import logging
 import datetime
@@ -41,7 +44,7 @@ def get_main_keyboard():
     )
 
 
-
+# ——— Load .env ———
 env = Path(__file__).parent / ".env"
 load_dotenv(env)
 BOT_TOKEN   = os.getenv("BOT_TOKEN")
@@ -55,7 +58,7 @@ ADMIN_IDS   = set(int(x) for x in os.getenv("ADMIN_IDS","").split(",") if x.stri
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
+# ——— Database pool ———
 db_pool = ThreadedConnectionPool(
     1, 10,
     host=DB_HOST, port=DB_PORT,
@@ -65,30 +68,31 @@ db_pool = ThreadedConnectionPool(
 def get_conn(): return db_pool.getconn()
 def put_conn(conn): db_pool.putconn(conn)
 
-
+# ——— Scheduler & constants ———
 scheduler = AsyncIOScheduler()
 RU_TO_CRON_DAY = {
     "понедельник":"mon","вторник":"tue","среда":"wed",
     "четверг":"thu","пятница":"fri","суббота":"sat",
     "воскресенье":"sun"
 }
-DELETE_DELAY_HOURS = 2    
+DELETE_DELAY_HOURS = 2    # авто‐удаление сообщений бота
 ADD_INPUT, DELETE_INPUT = range(2)
 
-
+# helper: удаляем сообщение бота
 def delete_msg(chat_id: int, message_id: int):
     asyncio.create_task(
         application.bot.delete_message(chat_id=chat_id, message_id=message_id)
     )
 
-
+# планируем одноразовую задачу удаления через delay_hours
 def schedule_deletion(chat_id: int, message_id: int, delay_hours: int = DELETE_DELAY_HOURS):
     run_date = datetime.datetime.now(timezone.utc) + timedelta(hours=delay_hours)
     scheduler.add_job(delete_msg, trigger="date", run_date=run_date, args=[chat_id, message_id])
 
+# ——— TimezoneFinder ———
 tf = TimezoneFinder()
 
-
+# ——— Инициализация схемы ———
 def init_db():
     conn = get_conn()
     try:
@@ -115,7 +119,7 @@ def init_db():
     finally:
         put_conn(conn)
 
-
+# ——— Проверка доступа ———
 async def is_allowed(user_id:int) -> bool:
     if user_id in ADMIN_IDS:
         return True
@@ -129,12 +133,12 @@ async def is_allowed(user_id:int) -> bool:
     finally:
         put_conn(conn)
 
-
+# ——— Отправка напоминания ———
 async def send_reminder(chat_id:int, text:str):
     msg = await application.bot.send_message(chat_id=chat_id, text=text)
     schedule_deletion(msg.chat_id, msg.message_id)
 
-
+# ——— Загрузка задач из БД ———
 def load_jobs():
     conn = get_conn()
     try:
@@ -162,7 +166,7 @@ def load_jobs():
             args=[cid, txt]
         )
 
-
+# ——— /start ———
 async def start(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     conn = get_conn()
@@ -193,7 +197,7 @@ async def start(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-
+# ——— Обработка локации ———
 async def location_handler(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     loc = update.message.location
     if not loc:
@@ -224,14 +228,16 @@ async def location_handler(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-
+# ——— /help (typed) ———
 async def help_cmd(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     text = (
       "Команды:\n"
       "/add — добавить напоминание\n"
       "/list — список напоминаний\n"
       "/delete — удалить напоминание по ID\n\n"
-      
+      "Админ:\n"
+      "/adduser — добавить пользователя\n"
+      "/removeuser — удалить пользователя"
     )
     msg = await update.message.reply_text(text, reply_markup=get_main_keyboard())
     schedule_deletion(msg.chat_id, msg.message_id)
@@ -239,7 +245,7 @@ async def help_cmd(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     except: pass
 
 
-
+# ——— Callback для inline-кнопки /help ———
 async def help_button_handler(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     msg = await update.callback_query.message.reply_text(
@@ -247,11 +253,13 @@ async def help_button_handler(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         "/add — добавить напоминание\n"
         "/list — список напоминаний\n"
         "/delete — удалить напоминание по ID\n\n"
-        
+        "Админ:\n"
+        "/adduser — добавить пользователя\n"
+        "/removeuser — удалить пользователя"
     )
     schedule_deletion(msg.chat_id, msg.message_id)
 
-
+# ——— Список напоминаний ———
 async def list_reminders(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not await is_allowed(uid):
@@ -283,7 +291,7 @@ async def list_reminders(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     try: await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
     except: pass
 
-
+# ——— Админ: adduser ———
 async def add_user(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
@@ -309,7 +317,7 @@ async def add_user(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     try: await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
     except: pass
 
-
+# ——— Админ: removeuser ———
 async def remove_user(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
@@ -335,7 +343,7 @@ async def remove_user(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     try: await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
     except: pass
 
-
+# ——— /add: entry ———
 async def start_add(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not await is_allowed(uid):
@@ -351,7 +359,7 @@ async def start_add(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     except: pass
     return ADD_INPUT
 
-
+# ——— /add: обработка ———
 async def add_input(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     parts = text.split(" ", 2)
@@ -417,7 +425,7 @@ async def add_input(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     except: pass
     return ConversationHandler.END
 
-
+# ——— /delete: entry ———
 async def start_delete(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not await is_allowed(uid):
@@ -431,7 +439,7 @@ async def start_delete(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     except: pass
     return DELETE_INPUT
 
-
+# ——— /delete: обработка ———
 async def delete_input(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     txt = update.message.text or ""
     if not txt.isdigit():
@@ -468,7 +476,7 @@ async def delete_input(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     except: pass
     return ConversationHandler.END
 
-
+# ——— /cancel ———
 async def cancel(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("Операция отменена.")
     schedule_deletion(msg.chat_id, msg.message_id)
@@ -476,7 +484,7 @@ async def cancel(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     except: pass
     return ConversationHandler.END
 
-
+# ——— on_startup ———
 async def on_startup(app):
     if scheduler.state == STATE_STOPPED:
         init_db()
@@ -486,7 +494,7 @@ async def on_startup(app):
 
 
 
-
+# ——— main ———
 if __name__ == '__main__':
     application = (
         ApplicationBuilder()
@@ -495,13 +503,13 @@ if __name__ == '__main__':
         .build()
     )
 
-   
+    # основные
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CallbackQueryHandler(help_button_handler, pattern="^help$"))
     application.add_handler(MessageHandler(filters.LOCATION, location_handler))
 
-    
+    # ——— Reply-кнопки «Список» и «/help» — оставляем как есть ——
     application.add_handler(
         MessageHandler(filters.Regex(r"^📋 Список$"), list_reminders)
         )
@@ -509,7 +517,7 @@ if __name__ == '__main__':
         MessageHandler(filters.Regex(r"^/help$"), help_cmd)
         )
 
-
+# ——— /add и кнопка «➕ Добавить» в одном ConversationHandler ——
     add_conv = ConversationHandler(
         entry_points=[
             CommandHandler("add", start_add),
@@ -517,7 +525,7 @@ if __name__ == '__main__':
          ],
         states={
             ADD_INPUT: [
-            
+            # второй шаг ловим любой текст кроме команд
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_input)
             ],
         },
@@ -525,7 +533,7 @@ if __name__ == '__main__':
         )
     application.add_handler(add_conv)
 
-
+# ——— /delete и кнопка «❌ Удалить» в одном ConversationHandler ——
     del_conv = ConversationHandler(
         entry_points=[
             CommandHandler("delete", start_delete),
@@ -541,7 +549,7 @@ if __name__ == '__main__':
     application.add_handler(del_conv)
 
 
-    
+    # список и админские
     application.add_handler(CommandHandler("list", list_reminders))
     application.add_handler(CommandHandler("adduser", add_user))
     application.add_handler(CommandHandler("removeuser", remove_user))
