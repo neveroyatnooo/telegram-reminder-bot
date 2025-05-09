@@ -229,9 +229,7 @@ async def help_cmd(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         "/add <день> <HH:MM> <текст>\n"
         "/list\n"
         "/delete <id>\n\n"
-        "Админ:\n"
-        "/adduser <user_id>\n"
-        "/removeuser <user_id>"
+        
     )
     schedule_deletion(msg.chat_id, msg.message_id)
     try:
@@ -247,9 +245,7 @@ async def help_button_handler(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         "/add <день> <HH:MM> <текст>\n"
         "/list\n"
         "/delete <id>\n\n"
-        "Админ:\n"
-        "/adduser <user_id>\n"
-        "/removeuser <user_id>"
+        
     )
     schedule_deletion(msg.chat_id, msg.message_id)
 
