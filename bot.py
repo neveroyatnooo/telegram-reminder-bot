@@ -1,34 +1,40 @@
 
 import os
 import logging
-import time
-import signal
-import datetime                                    
+import datetime
 from pathlib import Path
-
+from zoneinfo import ZoneInfo
+from timezonefinder import TimezoneFinder
 from dotenv import load_dotenv
 from psycopg2.pool import ThreadedConnectionPool
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.schedulers.base import STATE_STOPPED
 
-from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
+from telegram import (
+    Update,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    KeyboardButton
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    ContextTypes,
+    CommandHandler,
+    MessageHandler,
+    filters
+)
 
-
-env_path = Path(__file__).parent / ".env"
-load_dotenv(dotenv_path=env_path)
+# ——— Загрузка .env ———
+env = Path(__file__).parent / ".env"
+load_dotenv(env)
 
 BOT_TOKEN   = os.getenv("BOT_TOKEN")
-DB_HOST     = os.getenv("DB_HOST", "localhost")
+DB_HOST     = os.getenv("DB_HOST", "127.0.0.1")
 DB_PORT     = os.getenv("DB_PORT", "5432")
 DB_NAME     = os.getenv("DB_NAME")
 DB_USER     = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
-ADMIN_IDS   = set(
-    int(x) for x in os.getenv("ADMIN_IDS", "").split(",")
-    if x.strip().isdigit()
-)
-
+ADMIN_IDS   = set(int(x) for x in os.getenv("ADMIN_IDS","").split(",") if x.strip().isdigit())
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -36,137 +42,219 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
+# ——— Пул соединений ———
 db_pool = ThreadedConnectionPool(
     1, 10,
-    host=DB_HOST,
-    port=DB_PORT,
-    dbname=DB_NAME,
-    user=DB_USER,
+    host=DB_HOST, port=DB_PORT,
+    dbname=DB_NAME, user=DB_USER,
     password=DB_PASSWORD
 )
-def get_conn():
-    return db_pool.getconn()
-def put_conn(conn):
-    db_pool.putconn(conn)
+def get_conn(): return db_pool.getconn()
+def put_conn(conn): db_pool.putconn(conn)
 
-
-scheduler = AsyncIOScheduler(timezone="Asia/Yekaterinburg")
+# ——— Планировщик ———
+scheduler = AsyncIOScheduler()
 RU_TO_CRON_DAY = {
     "понедельник":"mon","вторник":"tue","среда":"wed",
     "четверг":"thu","пятница":"fri","суббота":"sat",
     "воскресенье":"sun"
 }
 
+# ——— TimezoneFinder ———
+tf = TimezoneFinder()
 
-async def is_allowed(user_id: int) -> bool:
+# ——— Инициализация схемы ———
+def init_db():
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS allowed_users (
+          user_id BIGINT PRIMARY KEY
+        );
+        CREATE TABLE IF NOT EXISTS reminders (
+          id           SERIAL PRIMARY KEY,
+          user_id      BIGINT NOT NULL REFERENCES allowed_users(user_id) ON DELETE CASCADE,
+          chat_id      BIGINT NOT NULL,
+          day_of_week  VARCHAR(10) NOT NULL,
+          time         TIME NOT NULL,
+          text         TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS user_timezones (
+          user_id  BIGINT PRIMARY KEY,
+          timezone VARCHAR(50) NOT NULL
+        );
+        """)
+        conn.commit()
+        cur.close()
+    finally:
+        put_conn(conn)
+
+# ——— Проверка доступа ———
+async def is_allowed(user_id:int) -> bool:
     if user_id in ADMIN_IDS:
         return True
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT 1 FROM allowed_users WHERE user_id = %s", (user_id,))
+        cur.execute("SELECT 1 FROM allowed_users WHERE user_id=%s", (user_id,))
         ok = cur.fetchone() is not None
         cur.close()
         return ok
     finally:
         put_conn(conn)
 
-async def send_reminder(chat_id: int, text: str):
+# ——— Отправка напоминания ———
+async def send_reminder(chat_id:int, text:str):
     await application.bot.send_message(chat_id=chat_id, text=text)
 
+# ——— Загрузка задач из БД ———
 def load_jobs():
-    """
-    Загружает из БД все напоминания и регистрирует их в планировщике.
-    Поле time может приходить как datetime.time или строкой "HH:MM".
-    """
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT id, day_of_week, time, text, chat_id FROM reminders")
+        cur.execute("""
+          SELECT r.id, r.day_of_week, r.time, r.text, r.chat_id,
+                 COALESCE(ut.timezone,'UTC')
+          FROM reminders r
+          LEFT JOIN user_timezones ut ON r.user_id = ut.user_id
+        """)
         rows = cur.fetchall()
         cur.close()
     finally:
         put_conn(conn)
 
-    for rid, day, tm, txt, cid in rows:
-        if isinstance(tm, datetime.time):
-            hh, mm = tm.hour, tm.minute
-        else:
-            hh, mm = map(int, tm.split(":"))
+    for rid, day, tm, txt, cid, tz in rows:
+        hh, mm = (tm.hour, tm.minute) if isinstance(tm, datetime.time) else map(int, tm.split(":"))
         scheduler.add_job(
             send_reminder,
             trigger="cron",
             id=str(rid),
             day_of_week=RU_TO_CRON_DAY[day],
             hour=hh, minute=mm,
+            timezone=tz,
             args=[cid, txt]
         )
 
+# ——— /start ———
+async def start(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    # проверяем, есть ли часовой пояс
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT timezone FROM user_timezones WHERE user_id=%s", (uid,))
+        has = cur.fetchone() is not None
+        cur.close()
+    finally:
+        put_conn(conn)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not has:
+        kb = [[KeyboardButton("📍 Отправить местоположение", request_location=True)]]
+        markup = ReplyKeyboardMarkup(kb, resize_keyboard=True, one_time_keyboard=True)
+        await update.message.reply_text(
+            "Привет! Чтобы работать с напоминаниями, мне нужен Ваш часовой пояс.\n"
+            "Пожалуйста, поделитесь геолокацией:",
+            reply_markup=markup
+        )
+    else:
+        await update.message.reply_text(
+            "С возвращением! Используйте /help для списка команд."
+        )
+
+# ——— Обработка локации ———
+async def location_handler(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
+    loc = update.message.location
+    if not loc:
+        return
+    tz_str = tf.timezone_at(lat=loc.latitude, lng=loc.longitude) or "UTC"
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+          INSERT INTO user_timezones(user_id,timezone)
+            VALUES(%s,%s)
+          ON CONFLICT(user_id) DO UPDATE SET timezone=EXCLUDED.timezone
+        """, (update.effective_user.id, tz_str))
+        conn.commit()
+        cur.close()
+    finally:
+        put_conn(conn)
+    # убираем клавиатуру
     await update.message.reply_text(
-        "Привет! Я бот-напоминалка.\n"
-        "Используй /help для списка команд."
+        f"Часовой пояс установлен: {tz_str}\n"
+        "Теперь вы можете добавлять напоминания.\n"
+        "Используйте /help для списка команд.",
+        reply_markup=ReplyKeyboardRemove()
     )
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ——— /help ———
+async def help_cmd(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Команды:\n"
-        "/add <день> <HH:MM> <текст> — добавить напоминание\n"
-        "/list — показать напоминания\n"
-        "/delete <id> — удалить напоминание\n\n"
+        "/add <день> <HH:MM> <текст>\n"
+        "/list\n"
+        "/delete <id>\n\n"
         "Админ:\n"
-        "/adduser <user_id> — разрешить доступ\n"
-        "/removeuser <user_id> — запретить доступ"
+        "/adduser <user_id>\n"
+        "/removeuser <user_id>"
     )
 
-async def add_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ——— /add ———
+async def add_reminder(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not await is_allowed(uid):
         return await update.message.reply_text("Доступ запрещён.")
-
-    parts = update.message.text.partition(" ")[2].split("/", 2)
-    if len(parts) < 3:
-        return await update.message.reply_text("Неверный формат. /add день/HH:MM/текст")
-    day_str, time_str, text = parts
-    day = day_str.strip().lower()
+    parts = update.message.text.split(" ", 3)
+    if len(parts) < 4:
+        return await update.message.reply_text("Использование: /add <день> <HH:MM> <текст>")
+    _, day_str, time_str, txt = parts
+    day = day_str.lower()
     if day not in RU_TO_CRON_DAY:
         return await update.message.reply_text("Неверный день недели.")
-
     try:
         hh, mm = map(int, time_str.split(":"))
-        if not (0 <= hh < 24 and 0 <= mm < 60):
-            raise ValueError
+        assert 0 <= hh < 24 and 0 <= mm < 60
     except:
-        return await update.message.reply_text("Неверное время. HH:MM")
-
+        return await update.message.reply_text("Неверный формат времени.")
+    # вставляем напоминание
     conn = get_conn()
     try:
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO reminders(user_id,chat_id,day_of_week,time,text) "
-            "VALUES(%s,%s,%s,%s,%s) RETURNING id",
-            (uid, update.effective_chat.id, day, time_str, text)
+          "INSERT INTO reminders(user_id,chat_id,day_of_week,time,text) "
+          "VALUES(%s,%s,%s,%s,%s) RETURNING id",
+          (uid, update.effective_chat.id, day, time_str, txt)
         )
         rid = cur.fetchone()[0]
         conn.commit()
         cur.close()
     finally:
         put_conn(conn)
-
-    
+    # получаем TZ
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT timezone FROM user_timezones WHERE user_id=%s", (uid,))
+        row = cur.fetchone()
+        cur.close()
+    finally:
+        put_conn(conn)
+    tz = row[0] if row else "UTC"
+    # создаём задачу
     scheduler.add_job(
         send_reminder,
         trigger="cron",
         id=str(rid),
         day_of_week=RU_TO_CRON_DAY[day],
         hour=hh, minute=mm,
-        args=[update.effective_chat.id, text]
+        timezone=tz,
+        args=[update.effective_chat.id, txt]
     )
-    await update.message.reply_text(f"Напоминание #{rid} добавлено.")
+    await update.message.reply_text(f"Напоминание #{rid} добавлено (часовой пояс {tz}).")
 
-async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ——— /list ———
+async def list_reminders(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not await is_allowed(uid):
         return await update.message.reply_text("Доступ запрещён.")
@@ -174,32 +262,30 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, day_of_week, time, text FROM reminders "
-            "WHERE user_id=%s ORDER BY id", (uid,)
+          "SELECT id, day_of_week, time, text FROM reminders WHERE user_id=%s ORDER BY id",
+          (uid,)
         )
         rows = cur.fetchall()
         cur.close()
     finally:
         put_conn(conn)
-
     if not rows:
-        return await update.message.reply_text("Напоминаний нет.")
+        return await update.message.reply_text("Нет напоминаний.")
     msg = "\n".join(f"{r[0]} — {r[1]}, {r[2]}, {r[3]}" for r in rows)
     await update.message.reply_text("Ваши напоминания:\n" + msg)
 
-async def delete_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ——— /delete ———
+async def delete_reminder(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not await is_allowed(uid):
         return await update.message.reply_text("Доступ запрещён.")
-    if not context.args or not context.args[0].isdigit():
+    if not ctx.args or not ctx.args[0].isdigit():
         return await update.message.reply_text("Использование: /delete <id>")
-    rid = int(context.args[0])
+    rid = int(ctx.args[0])
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT 1 FROM reminders WHERE id=%s AND user_id=%s", (rid, uid)
-        )
+        cur.execute("SELECT 1 FROM reminders WHERE id=%s AND user_id=%s", (rid, uid))
         if cur.fetchone() is None:
             cur.close()
             return await update.message.reply_text("Напоминание не найдено.")
@@ -208,38 +294,36 @@ async def delete_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.close()
     finally:
         put_conn(conn)
-
     try:
         scheduler.remove_job(str(rid))
     except:
         pass
     await update.message.reply_text(f"Напоминание #{rid} удалено.")
 
-async def add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ——— /adduser ———
+async def add_user(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
-    if not context.args or not context.args[0].isdigit():
+    if not ctx.args or not ctx.args[0].isdigit():
         return await update.message.reply_text("Использование: /adduser <user_id>")
-    new_id = int(context.args[0])
+    new_id = int(ctx.args[0])
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO allowed_users(user_id) VALUES(%s) ON CONFLICT DO NOTHING",
-            (new_id,)
-        )
+        cur.execute("INSERT INTO allowed_users(user_id) VALUES(%s) ON CONFLICT DO NOTHING", (new_id,))
         conn.commit()
         cur.close()
     finally:
         put_conn(conn)
     await update.message.reply_text(f"Пользователь {new_id} добавлен.")
 
-async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ——— /removeuser ———
+async def remove_user(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
-    if not context.args or not context.args[0].isdigit():
+    if not ctx.args or not ctx.args[0].isdigit():
         return await update.message.reply_text("Использование: /removeuser <user_id>")
-    rem_id = int(context.args[0])
+    rem_id = int(ctx.args[0])
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -250,24 +334,22 @@ async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         put_conn(conn)
     await update.message.reply_text(f"Пользователь {rem_id} удалён.")
 
-
+# ——— on_startup ———
 async def on_startup(app):
     if scheduler.state == STATE_STOPPED:
+        init_db()
         scheduler.start()
         logger.info("Scheduler started")
         load_jobs()
 
-
+# ——— main ———
 if __name__ == '__main__':
-    # создаём приложение и регистрируем хук запуска планировщика
     application = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
-        .post_init(on_startup)           # <-- здесь регистрируем ваш on_startup
+        .post_init(on_startup)
         .build()
     )
-
-    # Регистрируем все хендлеры
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("add", add_reminder))
@@ -275,10 +357,8 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("delete", delete_reminder))
     application.add_handler(CommandHandler("adduser", add_user))
     application.add_handler(CommandHandler("removeuser", remove_user))
-
-    # Запускаем long-polling
-    application.run_polling(stop_signals=())
-
+    application.add_handler(MessageHandler(filters.LOCATION, location_handler))
+    application.run_polling()
 
 
 
