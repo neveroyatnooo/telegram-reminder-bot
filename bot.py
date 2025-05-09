@@ -30,19 +30,6 @@ from telegram.ext import (
     ConversationHandler,
     filters
 )
-from telegram import ReplyKeyboardMarkup, KeyboardButton
-
-
-def get_main_keyboard():
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("➕ Добавить"), KeyboardButton("📋 Список")],
-            [KeyboardButton("❌ Удалить"), KeyboardButton("/help")]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=False
-    )
-
 
 # ——— Load .env ———
 env = Path(__file__).parent / ".env"
@@ -186,10 +173,11 @@ async def start(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
             reply_markup=ReplyKeyboardMarkup(kb_loc, resize_keyboard=True, one_time_keyboard=True)
         )
     else:
-         msg = await update.message.reply_text(
-             "С возвращением! Выберите действие:",
-             reply_markup=get_main_keyboard()
-         )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(text="/help", callback_data="help")]])
+        msg = await update.message.reply_text(
+            "С возвращением! Нажмите кнопку ниже, чтобы увидеть список команд:",
+            reply_markup=kb
+        )
 
     schedule_deletion(msg.chat_id, msg.message_id)
     try:
@@ -230,20 +218,20 @@ async def location_handler(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
 
 # ——— /help (typed) ———
 async def help_cmd(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
-    text = (
-      "Команды:\n"
-      "/add — добавить напоминание\n"
-      "/list — список напоминаний\n"
-      "/delete — удалить напоминание по ID\n\n"
-      "Админ:\n"
-      "/adduser — добавить пользователя\n"
-      "/removeuser — удалить пользователя"
+    msg = await update.message.reply_text(
+        "Команды:\n"
+        "/add — добавить напоминание\n"
+        "/list — список напоминаний\n"
+        "/delete — удалить напоминание по ID\n\n"
+        "Админ:\n"
+        "/adduser — добавить пользователя\n"
+        "/removeuser — удалить пользователя"
     )
-    msg = await update.message.reply_text(text, reply_markup=get_main_keyboard())
     schedule_deletion(msg.chat_id, msg.message_id)
-    try: await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
-    except: pass
-
+    try:
+        await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
+    except:
+        pass
 
 # ——— Callback для inline-кнопки /help ———
 async def help_button_handler(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
@@ -492,8 +480,6 @@ async def on_startup(app):
         logger.info("Scheduler started")
         load_jobs()
 
-
-
 # ——— main ———
 if __name__ == '__main__':
     application = (
@@ -509,45 +495,22 @@ if __name__ == '__main__':
     application.add_handler(CallbackQueryHandler(help_button_handler, pattern="^help$"))
     application.add_handler(MessageHandler(filters.LOCATION, location_handler))
 
-    # ——— Reply-кнопки «Список» и «/help» — оставляем как есть ——
-    application.add_handler(
-        MessageHandler(filters.Regex(r"^📋 Список$"), list_reminders)
-        )
-    application.add_handler(
-        MessageHandler(filters.Regex(r"^/help$"), help_cmd)
-        )
-
-# ——— /add и кнопка «➕ Добавить» в одном ConversationHandler ——
+    # двухшаговые /add и /delete
     add_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("add", start_add),
-            MessageHandler(filters.Regex(r"^➕ Добавить$"), start_add),
-         ],
-        states={
-            ADD_INPUT: [
-            # второй шаг ловим любой текст кроме команд
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_input)
-            ],
-        },
+        entry_points=[CommandHandler("add", start_add)],
+        states={ADD_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_input)]},
         fallbacks=[CommandHandler("cancel", cancel)],
-        )
+        per_user=True, per_chat=True
+    )
     application.add_handler(add_conv)
 
-# ——— /delete и кнопка «❌ Удалить» в одном ConversationHandler ——
     del_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("delete", start_delete),
-            MessageHandler(filters.Regex(r"^❌ Удалить$"), start_delete),
-            ],
-        states={
-            DELETE_INPUT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, delete_input)
-                ],
-            },
+        entry_points=[CommandHandler("delete", start_delete)],
+        states={DELETE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_input)]},
         fallbacks=[CommandHandler("cancel", cancel)],
-        )
+        per_user=True, per_chat=True
+    )
     application.add_handler(del_conv)
-
 
     # список и админские
     application.add_handler(CommandHandler("list", list_reminders))
