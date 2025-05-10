@@ -34,7 +34,6 @@ from telegram.ext import (
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("📍 Отправить местоположение", request_location=True)],
             [KeyboardButton("Добавить"), KeyboardButton("Список")],
             [KeyboardButton("Удалить"), KeyboardButton("Помощь")]
         ],
@@ -42,9 +41,17 @@ def get_main_keyboard():
         one_time_keyboard=False
     )
 
+INLINE_KB = InlineKeyboardMarkup(
+    [
+        [InlineKeyboardButton("Добавить", callback_data="add")],
+        [InlineKeyboardButton("Список", callback_data="list")],
+        [InlineKeyboardButton("Удалить", callback_data="delete")],
+        [InlineKeyboardButton("Помощь", callback_data="help")]
+    ]
+)
+
 env = Path(__file__).parent / ".env"
 load_dotenv(env)
-
 BOT_TOKEN   = os.getenv("BOT_TOKEN")
 DB_HOST     = os.getenv("DB_HOST", "127.0.0.1")
 DB_PORT     = os.getenv("DB_PORT", "5432")
@@ -59,8 +66,7 @@ logger = logging.getLogger(__name__)
 db_pool = ThreadedConnectionPool(
     1, 10,
     host=DB_HOST, port=DB_PORT,
-    dbname=DB_NAME, user=DB_USER,
-    password=DB_PASSWORD
+    dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD
 )
 def get_conn(): return db_pool.getconn()
 def put_conn(conn): db_pool.putconn(conn)
@@ -75,9 +81,7 @@ DELETE_DELAY_HOURS = 2
 ADD_INPUT, DELETE_INPUT = range(2)
 
 def delete_msg(chat_id: int, message_id: int):
-    asyncio.create_task(
-        application.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    )
+    asyncio.create_task(application.bot.delete_message(chat_id=chat_id, message_id=message_id))
 
 def schedule_deletion(chat_id: int, message_id: int, delay_hours: int = DELETE_DELAY_HOURS):
     run_date = datetime.datetime.now(timezone.utc) + timedelta(hours=delay_hours)
@@ -142,9 +146,8 @@ def load_jobs():
         cur.close()
     finally:
         put_conn(conn)
-
     for rid, day, tm, txt, cid, tz in rows:
-        hh, mm = (tm.hour, tm.minute) if isinstance(tm, datetime.time) else map(int, tm.split(":"))
+        hh, mm = (tm.hour, tm.minute) if hasattr(tm, 'hour') else map(int, tm.split(":"))
         scheduler.add_job(
             send_reminder,
             trigger="cron",
@@ -156,11 +159,33 @@ def load_jobs():
         )
 
 async def start(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text(
-        "Привет! Выберите действие:",
-        reply_markup=get_main_keyboard()
-    )
-    schedule_deletion(msg.chat_id, msg.message_id)
+    uid = update.effective_user.id
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT timezone FROM user_timezones WHERE user_id=%s", (uid,))
+        row = cur.fetchone()
+        cur.close()
+    finally:
+        put_conn(conn)
+    if not row:
+        kb_loc = [[KeyboardButton("📍 Отправить местоположение", request_location=True)]]
+        msg = await update.message.reply_text(
+            "Привет! Чтобы работать с напоминаниями, мне нужен Ваш часовой пояс.\nПожалуйста, поделитесь геолокацией:",
+            reply_markup=ReplyKeyboardMarkup(kb_loc, resize_keyboard=True, one_time_keyboard=True)
+        )
+        schedule_deletion(msg.chat_id, msg.message_id)
+    else:
+        msg1 = await update.message.reply_text(
+            "С возвращением! Выберите действие:",
+            reply_markup=get_main_keyboard()
+        )
+        schedule_deletion(msg1.chat_id, msg1.message_id)
+        msg2 = await update.message.reply_text(
+            "Или воспользуйтесь кнопками ниже:",
+            reply_markup=INLINE_KB
+        )
+        schedule_deletion(msg2.chat_id, msg2.message_id)
     try:
         await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
     except:
@@ -183,9 +208,8 @@ async def location_handler(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         cur.close()
     finally:
         put_conn(conn)
-
     msg = await update.message.reply_text(
-        f"Часовой пояс установлен: {tz_str}",
+        f"Часовой пояс установлен: {tz_str}\nТеперь вы можете добавлять напоминания.",
         reply_markup=get_main_keyboard()
     )
     schedule_deletion(msg.chat_id, msg.message_id)
@@ -195,6 +219,15 @@ async def location_handler(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         pass
 
 async def help_cmd(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer()
+        chat = update.callback_query.message.chat_id
+    else:
+        chat = update.effective_chat.id
+        try:
+            await ctx.bot.delete_message(chat, update.message.message_id)
+        except:
+            pass
     text = (
       "Команды:\n"
       "/add — добавить напоминание\n"
@@ -204,55 +237,39 @@ async def help_cmd(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
       "/adduser — добавить пользователя\n"
       "/removeuser — удалить пользователя"
     )
-    msg = await update.message.reply_text(text, reply_markup=get_main_keyboard())
-    schedule_deletion(msg.chat_id, msg.message_id)
-    try: await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
-    except: pass
-
-async def help_button_handler(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    msg = await update.callback_query.message.reply_text(
-        "Команды:\n"
-        "/add — добавить напоминание\n"
-        "/list — список напоминаний\n"
-        "/delete — удалить напоминание по ID\n\n"
-        "Админ:\n"
-        "/adduser — добавить пользователя\n"
-        "/removeuser — удалить пользователя",
-        reply_markup=get_main_keyboard()
-    )
+    msg = await ctx.bot.send_message(chat, text, reply_markup=get_main_keyboard())
     schedule_deletion(msg.chat_id, msg.message_id)
 
 async def list_reminders(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
+    if update.callback_query:
+        await update.callback_query.answer()
+        chat = update.callback_query.message.chat_id
+        uid = update.callback_query.from_user.id
+    else:
+        chat = update.effective_chat.id
+        uid = update.effective_user.id
+        try:
+            await ctx.bot.delete_message(chat, update.message.message_id)
+        except:
+            pass
     if not await is_allowed(uid):
-        msg = await update.message.reply_text("Доступ запрещён.", reply_markup=get_main_keyboard())
+        msg = await ctx.bot.send_message(chat, "Доступ запрещён.", reply_markup=get_main_keyboard())
         schedule_deletion(msg.chat_id, msg.message_id)
-        try: await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
-        except: pass
         return
-
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute(
-          "SELECT id, day_of_week, time, text FROM reminders WHERE user_id=%s ORDER BY id",
-          (uid,)
-        )
+        cur.execute("SELECT id, day_of_week, time, text FROM reminders WHERE user_id=%s ORDER BY id", (uid,))
         rows = cur.fetchall()
         cur.close()
     finally:
         put_conn(conn)
-
     if not rows:
         text = "Нет напоминаний."
     else:
         text = "Ваши напоминания:\n" + "\n".join(f"{r[0]} — {r[1]}, {r[2]}, {r[3]}" for r in rows)
-
-    msg = await update.message.reply_text(text, reply_markup=get_main_keyboard())
+    msg = await ctx.bot.send_message(chat, text, reply_markup=get_main_keyboard())
     schedule_deletion(msg.chat_id, msg.message_id)
-    try: await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
-    except: pass
 
 async def add_user(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
@@ -260,10 +277,11 @@ async def add_user(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if not ctx.args or not ctx.args[0].isdigit():
         msg = await update.message.reply_text("Использование: /adduser <user_id>", reply_markup=get_main_keyboard())
         schedule_deletion(msg.chat_id, msg.message_id)
-        try: await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
-        except: pass
+        try:
+            await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
+        except:
+            pass
         return
-
     new_id = int(ctx.args[0])
     conn = get_conn()
     try:
@@ -273,11 +291,8 @@ async def add_user(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         cur.close()
     finally:
         put_conn(conn)
-
-    msg = await update.message.reply_text(f"Пользователь {new_id} добавлен.", reply_markup=get_main_keyboard())
+    msg = await ctx.bot.send_message(update.effective_chat.id, f"Пользователь {new_id} добавлен.", reply_markup=get_main_keyboard())
     schedule_deletion(msg.chat_id, msg.message_id)
-    try: await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
-    except: pass
 
 async def remove_user(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
@@ -285,10 +300,11 @@ async def remove_user(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if not ctx.args or not ctx.args[0].isdigit():
         msg = await update.message.reply_text("Использование: /removeuser <user_id>", reply_markup=get_main_keyboard())
         schedule_deletion(msg.chat_id, msg.message_id)
-        try: await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
-        except: pass
+        try:
+            await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
+        except:
+            pass
         return
-
     rem_id = int(ctx.args[0])
     conn = get_conn()
     try:
@@ -298,26 +314,27 @@ async def remove_user(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         cur.close()
     finally:
         put_conn(conn)
-
-    msg = await update.message.reply_text(f"Пользователь {rem_id} удалён.", reply_markup=get_main_keyboard())
+    msg = await ctx.bot.send_message(update.effective_chat.id, f"Пользователь {rem_id} удалён.", reply_markup=get_main_keyboard())
     schedule_deletion(msg.chat_id, msg.message_id)
-    try: await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
-    except: pass
 
 async def start_add(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
+    if update.callback_query:
+        await update.callback_query.answer()
+        chat = update.callback_query.message.chat_id
+        uid = update.callback_query.from_user.id
+    else:
+        chat = update.effective_chat.id
+        uid = update.effective_user.id
+        try:
+            await ctx.bot.delete_message(chat, update.message.message_id)
+        except:
+            pass
     if not await is_allowed(uid):
-        msg = await update.message.reply_text("Доступ запрещён.", reply_markup=get_main_keyboard())
+        msg = await ctx.bot.send_message(chat, "Доступ запрещён.", reply_markup=get_main_keyboard())
         schedule_deletion(msg.chat_id, msg.message_id)
         return ConversationHandler.END
-
-    msg = await update.message.reply_text(
-        "Отправьте напоминание в формате:\n<день недели> <HH:MM> <текст>",
-        reply_markup=get_main_keyboard()
-    )
+    msg = await ctx.bot.send_message(chat, "Отправьте напоминание в формате:\n<день недели> <HH:MM> <текст>")
     schedule_deletion(msg.chat_id, msg.message_id)
-    try: await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
-    except: pass
     return ADD_INPUT
 
 async def add_input(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
@@ -327,14 +344,12 @@ async def add_input(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         msg = await update.message.reply_text("Неверный формат. Попробуйте ещё раз или /cancel.", reply_markup=get_main_keyboard())
         schedule_deletion(msg.chat_id, msg.message_id)
         return ADD_INPUT
-
     day, time_str, reminder_text = parts
     day = day.lower()
     if day not in RU_TO_CRON_DAY:
         msg = await update.message.reply_text("Неверный день недели. Попробуйте ещё раз.", reply_markup=get_main_keyboard())
         schedule_deletion(msg.chat_id, msg.message_id)
         return ADD_INPUT
-
     try:
         hh, mm = map(int, time_str.split(":"))
         assert 0 <= hh < 24 and 0 <= mm < 60
@@ -342,7 +357,6 @@ async def add_input(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         msg = await update.message.reply_text("Неверный формат времени. Попробуйте ещё раз.", reply_markup=get_main_keyboard())
         schedule_deletion(msg.chat_id, msg.message_id)
         return ADD_INPUT
-
     uid = update.effective_user.id
     chat_id = update.effective_chat.id
     conn = get_conn()
@@ -358,7 +372,6 @@ async def add_input(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         cur.close()
     finally:
         put_conn(conn)
-
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -367,7 +380,6 @@ async def add_input(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         cur.close()
     finally:
         put_conn(conn)
-
     tz = row[0] if row else "UTC"
     scheduler.add_job(
         send_reminder,
@@ -378,24 +390,28 @@ async def add_input(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         timezone=tz,
         args=[chat_id, reminder_text]
     )
-
     msg = await update.message.reply_text(f"Напоминание #{rid} добавлено.", reply_markup=get_main_keyboard())
     schedule_deletion(msg.chat_id, msg.message_id)
-    try: await ctx.bot.delete_message(chat_id, update.message.message_id)
-    except: pass
     return ConversationHandler.END
 
 async def start_delete(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
+    if update.callback_query:
+        await update.callback_query.answer()
+        chat = update.callback_query.message.chat_id
+        uid = update.callback_query.from_user.id
+    else:
+        chat = update.effective_chat.id
+        uid = update.effective_user.id
+        try:
+            await ctx.bot.delete_message(chat, update.message.message_id)
+        except:
+            pass
     if not await is_allowed(uid):
-        msg = await update.message.reply_text("Доступ запрещён.", reply_markup=get_main_keyboard())
+        msg = await ctx.bot.send_message(chat, "Доступ запрещён.", reply_markup=get_main_keyboard())
         schedule_deletion(msg.chat_id, msg.message_id)
         return ConversationHandler.END
-
-    msg = await update.message.reply_text("Отправьте ID напоминания для удаления:", reply_markup=get_main_keyboard())
+    msg = await ctx.bot.send_message(chat, "Отправьте ID напоминания для удаления:")
     schedule_deletion(msg.chat_id, msg.message_id)
-    try: await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
-    except: pass
     return DELETE_INPUT
 
 async def delete_input(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
@@ -404,7 +420,6 @@ async def delete_input(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         msg = await update.message.reply_text("ID должен быть числом. Попробуйте ещё раз.", reply_markup=get_main_keyboard())
         schedule_deletion(msg.chat_id, msg.message_id)
         return DELETE_INPUT
-
     rid = int(txt)
     uid = update.effective_user.id
     conn = get_conn()
@@ -416,29 +431,28 @@ async def delete_input(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
             msg = await update.message.reply_text("Напоминание не найдено.", reply_markup=get_main_keyboard())
             schedule_deletion(msg.chat_id, msg.message_id)
             return ConversationHandler.END
-
         cur.execute("DELETE FROM reminders WHERE id=%s", (rid,))
         conn.commit()
         cur.close()
     finally:
         put_conn(conn)
-
     try:
         scheduler.remove_job(str(rid))
     except:
         pass
-
     msg = await update.message.reply_text(f"Напоминание #{rid} удалено.", reply_markup=get_main_keyboard())
     schedule_deletion(msg.chat_id, msg.message_id)
-    try: await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
-    except: pass
     return ConversationHandler.END
 
 async def cancel(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("Операция отменена.", reply_markup=get_main_keyboard())
+    if update.message:
+        chat = update.effective_chat.id
+        try:
+            await ctx.bot.delete_message(chat, update.message.message_id)
+        except:
+            pass
+    msg = await ctx.bot.send_message(update.effective_chat.id, "Операция отменена.", reply_markup=get_main_keyboard())
     schedule_deletion(msg.chat_id, msg.message_id)
-    try: await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
-    except: pass
     return ConversationHandler.END
 
 async def on_startup(app):
@@ -458,7 +472,6 @@ if __name__ == '__main__':
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_cmd))
-    application.add_handler(CallbackQueryHandler(help_button_handler, pattern="^help$"))
     application.add_handler(MessageHandler(filters.LOCATION, location_handler))
 
     application.add_handler(MessageHandler(filters.Regex(r"^Список$"), list_reminders))
@@ -468,9 +481,10 @@ if __name__ == '__main__':
         entry_points=[
             CommandHandler("add", start_add),
             MessageHandler(filters.Regex(r"^Добавить$"), start_add),
+            CallbackQueryHandler(start_add, pattern="^add$")
         ],
-        states={ ADD_INPUT: [ MessageHandler(filters.TEXT & ~filters.COMMAND, add_input) ] },
-        fallbacks=[ CommandHandler("cancel", cancel) ],
+        states={ ADD_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_input)] },
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
     application.add_handler(add_conv)
 
@@ -478,14 +492,18 @@ if __name__ == '__main__':
         entry_points=[
             CommandHandler("delete", start_delete),
             MessageHandler(filters.Regex(r"^Удалить$"), start_delete),
+            CallbackQueryHandler(start_delete, pattern="^delete$")
         ],
-        states={ DELETE_INPUT: [ MessageHandler(filters.TEXT & ~filters.COMMAND, delete_input) ] },
-        fallbacks=[ CommandHandler("cancel", cancel) ],
+        states={ DELETE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_input)] },
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
     application.add_handler(del_conv)
 
     application.add_handler(CommandHandler("list", list_reminders))
     application.add_handler(CommandHandler("adduser", add_user))
     application.add_handler(CommandHandler("removeuser", remove_user))
+
+    application.add_handler(CallbackQueryHandler(list_reminders, pattern="^list$"))
+    application.add_handler(CallbackQueryHandler(help_cmd, pattern="^help$"))
 
     application.run_polling()
