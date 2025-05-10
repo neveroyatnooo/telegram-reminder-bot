@@ -497,42 +497,58 @@ if __name__ == '__main__':
         .build()
     )
 
+    # /start, /help, локация
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(MessageHandler(filters.LOCATION, location_handler))
 
+    # Список и помощь по тексту кнопок
     application.add_handler(MessageHandler(filters.Regex(r"^Список$"), list_reminders))
     application.add_handler(MessageHandler(filters.Regex(r"^Помощь$"), help_cmd))
 
+    # Inline-кнопки: хендлеры на коллбеки
+    application.add_handler(CallbackQueryHandler(start_add,    pattern="^add$"))
+    application.add_handler(CallbackQueryHandler(list_reminders, pattern="^list$"))
+    application.add_handler(CallbackQueryHandler(start_delete, pattern="^delete$"))
+    application.add_handler(CallbackQueryHandler(help_cmd,    pattern="^help$"))
+
+    # Conversation для /add и кнопки "Добавить"
     add_conv = ConversationHandler(
         entry_points=[
             CommandHandler("add", start_add),
             MessageHandler(filters.Regex(r"^Добавить$"), start_add),
             CallbackQueryHandler(start_add, pattern="^add$")
         ],
-        states={ ADD_INPUT: [ MessageHandler(filters.TEXT & ~filters.COMMAND, add_input) ] },
-        fallbacks=[ CommandHandler("cancel", cancel) ],
-        per_message=True
+        states={
+            ADD_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, add_input)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        # per_chat по умолчанию = True, per_user=False, per_message=False
     )
     application.add_handler(add_conv)
 
+    # Conversation для /delete и кнопки "Удалить"
     del_conv = ConversationHandler(
         entry_points=[
             CommandHandler("delete", start_delete),
             MessageHandler(filters.Regex(r"^Удалить$"), start_delete),
             CallbackQueryHandler(start_delete, pattern="^delete$")
         ],
-        states={ DELETE_INPUT: [ MessageHandler(filters.TEXT & ~filters.COMMAND, delete_input) ] },
-        fallbacks=[ CommandHandler("cancel", cancel) ],
-        per_message=True
+        states={
+            DELETE_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, delete_input)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        # per_chat по умолчанию = True
     )
     application.add_handler(del_conv)
 
+    # Дополнительные слэш-команды
     application.add_handler(CommandHandler("list", list_reminders))
     application.add_handler(CommandHandler("adduser", add_user))
     application.add_handler(CommandHandler("removeuser", remove_user))
-
-    application.add_handler(CallbackQueryHandler(list_reminders, pattern="^list$"))
-    application.add_handler(CallbackQueryHandler(help_cmd, pattern="^help$"))
 
     application.run_polling()
