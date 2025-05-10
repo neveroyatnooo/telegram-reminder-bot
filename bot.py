@@ -31,6 +31,7 @@ from telegram.ext import (
     filters
 )
 
+# клавиатуры
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         [
@@ -50,8 +51,10 @@ INLINE_KB = InlineKeyboardMarkup(
     ]
 )
 
+# load .env
 env = Path(__file__).parent / ".env"
 load_dotenv(env)
+
 BOT_TOKEN   = os.getenv("BOT_TOKEN")
 DB_HOST     = os.getenv("DB_HOST", "127.0.0.1")
 DB_PORT     = os.getenv("DB_PORT", "5432")
@@ -63,14 +66,17 @@ ADMIN_IDS   = set(int(x) for x in os.getenv("ADMIN_IDS","").split(",") if x.stri
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# db pool
 db_pool = ThreadedConnectionPool(
     1, 10,
     host=DB_HOST, port=DB_PORT,
-    dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD
+    dbname=DB_NAME, user=DB_USER,
+    password=DB_PASSWORD
 )
 def get_conn(): return db_pool.getconn()
 def put_conn(conn): db_pool.putconn(conn)
 
+# scheduler
 scheduler = AsyncIOScheduler()
 RU_TO_CRON_DAY = {
     "понедельник":"mon","вторник":"tue","среда":"wed",
@@ -81,7 +87,9 @@ DELETE_DELAY_HOURS = 2
 ADD_INPUT, DELETE_INPUT = range(2)
 
 def delete_msg(chat_id: int, message_id: int):
-    asyncio.create_task(application.bot.delete_message(chat_id=chat_id, message_id=message_id))
+    asyncio.create_task(
+        application.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    )
 
 def schedule_deletion(chat_id: int, message_id: int, delay_hours: int = DELETE_DELAY_HOURS):
     run_date = datetime.datetime.now(timezone.utc) + timedelta(hours=delay_hours)
@@ -89,6 +97,7 @@ def schedule_deletion(chat_id: int, message_id: int, delay_hours: int = DELETE_D
 
 tf = TimezoneFinder()
 
+# init db
 def init_db():
     conn = get_conn()
     try:
@@ -115,6 +124,7 @@ def init_db():
     finally:
         put_conn(conn)
 
+# check access
 async def is_allowed(user_id:int) -> bool:
     if user_id in ADMIN_IDS:
         return True
@@ -128,10 +138,12 @@ async def is_allowed(user_id:int) -> bool:
     finally:
         put_conn(conn)
 
+# send reminder
 async def send_reminder(chat_id:int, text:str):
     msg = await application.bot.send_message(chat_id=chat_id, text=text)
     schedule_deletion(msg.chat_id, msg.message_id)
 
+# load jobs
 def load_jobs():
     conn = get_conn()
     try:
@@ -158,6 +170,7 @@ def load_jobs():
             args=[cid, txt]
         )
 
+# /start
 async def start(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     conn = get_conn()
@@ -168,6 +181,7 @@ async def start(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         cur.close()
     finally:
         put_conn(conn)
+
     if not row:
         kb_loc = [[KeyboardButton("📍 Отправить местоположение", request_location=True)]]
         msg = await update.message.reply_text(
@@ -186,11 +200,13 @@ async def start(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
             reply_markup=INLINE_KB
         )
         schedule_deletion(msg2.chat_id, msg2.message_id)
+
     try:
         await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
     except:
         pass
 
+# location handler
 async def location_handler(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     loc = update.message.location
     if not loc:
@@ -208,6 +224,7 @@ async def location_handler(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
         cur.close()
     finally:
         put_conn(conn)
+
     msg = await update.message.reply_text(
         f"Часовой пояс установлен: {tz_str}\nТеперь вы можете добавлять напоминания.",
         reply_markup=get_main_keyboard()
@@ -218,6 +235,7 @@ async def location_handler(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
+# /help
 async def help_cmd(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
@@ -240,6 +258,7 @@ async def help_cmd(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     msg = await ctx.bot.send_message(chat, text, reply_markup=get_main_keyboard())
     schedule_deletion(msg.chat_id, msg.message_id)
 
+# list reminders
 async def list_reminders(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
@@ -271,6 +290,7 @@ async def list_reminders(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     msg = await ctx.bot.send_message(chat, text, reply_markup=get_main_keyboard())
     schedule_deletion(msg.chat_id, msg.message_id)
 
+# admin adduser
 async def add_user(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
@@ -294,6 +314,7 @@ async def add_user(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     msg = await ctx.bot.send_message(update.effective_chat.id, f"Пользователь {new_id} добавлен.", reply_markup=get_main_keyboard())
     schedule_deletion(msg.chat_id, msg.message_id)
 
+# admin removeuser
 async def remove_user(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
@@ -317,6 +338,7 @@ async def remove_user(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     msg = await ctx.bot.send_message(update.effective_chat.id, f"Пользователь {rem_id} удалён.", reply_markup=get_main_keyboard())
     schedule_deletion(msg.chat_id, msg.message_id)
 
+# /add entry
 async def start_add(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
@@ -337,6 +359,7 @@ async def start_add(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     schedule_deletion(msg.chat_id, msg.message_id)
     return ADD_INPUT
 
+# /add обработка
 async def add_input(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     parts = text.split(" ", 2)
@@ -394,6 +417,7 @@ async def add_input(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     schedule_deletion(msg.chat_id, msg.message_id)
     return ConversationHandler.END
 
+# /delete entry
 async def start_delete(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
@@ -414,6 +438,7 @@ async def start_delete(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     schedule_deletion(msg.chat_id, msg.message_id)
     return DELETE_INPUT
 
+# /delete обработка
 async def delete_input(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     txt = update.message.text or ""
     if not txt.isdigit():
@@ -444,17 +469,18 @@ async def delete_input(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     schedule_deletion(msg.chat_id, msg.message_id)
     return ConversationHandler.END
 
+# /cancel
 async def cancel(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
     if update.message:
-        chat = update.effective_chat.id
         try:
-            await ctx.bot.delete_message(chat, update.message.message_id)
+            await ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
         except:
             pass
     msg = await ctx.bot.send_message(update.effective_chat.id, "Операция отменена.", reply_markup=get_main_keyboard())
     schedule_deletion(msg.chat_id, msg.message_id)
     return ConversationHandler.END
 
+# on startup
 async def on_startup(app):
     if scheduler.state == STATE_STOPPED:
         init_db()
@@ -462,6 +488,7 @@ async def on_startup(app):
         logger.info("Scheduler started")
         load_jobs()
 
+# main
 if __name__ == '__main__':
     application = (
         ApplicationBuilder()
@@ -483,8 +510,9 @@ if __name__ == '__main__':
             MessageHandler(filters.Regex(r"^Добавить$"), start_add),
             CallbackQueryHandler(start_add, pattern="^add$")
         ],
-        states={ ADD_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_input)] },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        states={ ADD_INPUT: [ MessageHandler(filters.TEXT & ~filters.COMMAND, add_input) ] },
+        fallbacks=[ CommandHandler("cancel", cancel) ],
+        per_message=True
     )
     application.add_handler(add_conv)
 
@@ -494,8 +522,9 @@ if __name__ == '__main__':
             MessageHandler(filters.Regex(r"^Удалить$"), start_delete),
             CallbackQueryHandler(start_delete, pattern="^delete$")
         ],
-        states={ DELETE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_input)] },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        states={ DELETE_INPUT: [ MessageHandler(filters.TEXT & ~filters.COMMAND, delete_input) ] },
+        fallbacks=[ CommandHandler("cancel", cancel) ],
+        per_message=True
     )
     application.add_handler(del_conv)
 
