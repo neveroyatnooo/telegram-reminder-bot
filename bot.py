@@ -275,9 +275,7 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
       "/add — добавить напоминание\n"
       "/list — список напоминаний\n"
       "/delete — удалить напоминание по ID\n\n"
-      "Админ:\n"
-      "/adduser — добавить пользователя\n"
-      "/removeuser — удалить пользователя"
+      
     )
     msg = await ctx.bot.send_message(chat_id, text,
                                      reply_markup=get_main_keyboard())
