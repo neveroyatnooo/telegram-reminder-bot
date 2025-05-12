@@ -140,7 +140,7 @@ def init_db():
     conn = get_conn()
     try:
         cur = conn.cursor()
-        # Создать таблицы, если их нет
+        # создаём таблицы, если их нет
         cur.execute("""
         CREATE TABLE IF NOT EXISTS allowed_users (
           user_id BIGINT PRIMARY KEY
@@ -160,14 +160,36 @@ def init_db():
         );
         """)
         conn.commit()
-        # Добавить столбец, если права есть
+
+        # добавляем колонку message_thread_id, если надо
         try:
-            cur.execute("ALTER TABLE reminders ADD COLUMN IF NOT EXISTS message_thread_id BIGINT")
+            cur.execute(
+              "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS message_thread_id BIGINT"
+            )
             conn.commit()
         except psycopg2.errors.InsufficientPrivilege:
             conn.rollback()
             logger.warning("Нет прав на ALTER TABLE reminders — пропускаем")
-        # Проверить наличие столбца
+
+        # ИСПРАВЛЕНИЕ: переводим day_of_week в TEXT,
+        # чтобы убрать ограничение VARCHAR(10)
+        try:
+            cur.execute(
+                "ALTER TABLE reminders ALTER COLUMN day_of_week TYPE TEXT"
+            )
+            conn.commit()
+        except psycopg2.errors.InsufficientPrivilege:
+            conn.rollback()
+            logger.warning(
+                "Нет прав на изменение типа поля day_of_week; "
+                "выполните вручную:\n"
+                "  ALTER TABLE reminders ALTER COLUMN day_of_week TYPE TEXT"
+            )
+        except Exception as e:
+            conn.rollback()
+            logger.error("Не удалось ALTER COLUMN day_of_week: %s", e)
+
+        # проверяем, есть ли у нас колонка message_thread_id
         cur.execute("""
           SELECT 1 FROM information_schema.columns
            WHERE table_name='reminders'
@@ -175,8 +197,10 @@ def init_db():
         """)
         HAS_THREAD_COL = cur.fetchone() is not None
         cur.close()
+
     finally:
         put_conn(conn)
+
 
 # ——— Проверка доступа пользователя ——————————————————————
 async def is_allowed(user_id: int) -> bool:
