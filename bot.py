@@ -585,19 +585,24 @@ if __name__ == '__main__':
     )
     application.add_handler(add_conv)
 
+        # ConversationHandler для /delete и кнопки «Удалить»
     del_conv = ConversationHandler(
-…  
         entry_points=[
-            CommandHandler("delete", start_delete),
+            CommandHandler("delete",     start_delete),
             MessageHandler(filters.Regex(r"^Удалить$"), start_delete),
             CallbackQueryHandler(start_delete, pattern="^delete$")
         ],
-        states={DELETE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_input)]},
-        fallbacks=[CommandHandler("cancel", cancel)],
+        states={
+            DELETE_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, delete_input)
+            ],
+        },
+        fallbacks=[ CommandHandler("cancel", cancel) ],
         per_message=True,
         allow_reentry=True
     )
     application.add_handler(del_conv)
+
 
     # список и помощь
     application.add_handler(MessageHandler(filters.Regex(r"^Список$"),   list_reminders))
