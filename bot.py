@@ -32,7 +32,7 @@ from telegram.ext import (
     filters
 )
 
-# ——— Карта дней недели (строки для APScheduler) ——————————————————
+# ——— Карта дней недели для APScheduler ——————————————————
 RU_TO_CRON_DAY = {
     "понедельник": "mon",
     "вторник":     "tue",
@@ -42,8 +42,7 @@ RU_TO_CRON_DAY = {
     "суббота":     "sat",
     "воскресенье": "sun"
 }
-
-# Поддержка числовых дней недели (1=понедельник…6=суббота, 7/0=воскресенье)
+# Поддержка числовых дней недели
 NUM_TO_RU_DAY = {
     "1": "понедельник",
     "2": "вторник",
@@ -55,10 +54,9 @@ NUM_TO_RU_DAY = {
     "0": "воскресенье",
 }
 
-# ——— Флаг наличия столбца message_thread_id ————————————————
 HAS_THREAD_COL = False
+ADD_INPUT, DELETE_INPUT = range(2)
 
-# ——— Вспомогательные функции для форумных тем —————————————
 def get_thread_id(update: Update) -> int | None:
     return getattr(update.effective_message, "message_thread_id", None)
 
@@ -68,7 +66,6 @@ def with_thread(kwargs: dict, update: Update) -> dict:
         kwargs["message_thread_id"] = tid
     return kwargs
 
-# ——— Клавиатуры ——————————————————————————————————————
 def get_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
@@ -86,7 +83,6 @@ INLINE_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Помощь",   callback_data="help")],
 ])
 
-# ——— Загрузка .env ————————————————————————————————————
 env = Path(__file__).parent / ".env"
 load_dotenv(env)
 
@@ -96,17 +92,12 @@ DB_PORT     = os.getenv("DB_PORT",    "5432")
 DB_NAME     = os.getenv("DB_NAME")
 DB_USER     = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
-ADMIN_IDS   = {
-    int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.isdigit()
-}
+ADMIN_IDS   = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.isdigit()}
 
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s",
+                    level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ——— Пул соединений PostgreSQL —————————————————————————
 db_pool = ThreadedConnectionPool(
     1, 10,
     host=DB_HOST, port=DB_PORT,
@@ -116,10 +107,8 @@ db_pool = ThreadedConnectionPool(
 def get_conn(): return db_pool.getconn()
 def put_conn(conn): db_pool.putconn(conn)
 
-# ——— Планировщик APScheduler ——————————————————————————
 scheduler = AsyncIOScheduler()
 DELETE_DELAY_HOURS = 2
-ADD_INPUT, DELETE_INPUT = range(2)
 
 def delete_msg(chat_id: int, message_id: int):
     asyncio.create_task(
@@ -134,14 +123,11 @@ def schedule_deletion(chat_id: int, message_id: int,
 
 tf = TimezoneFinder()
 
-# ——— Инициализация и миграция схемы ——————————————————————
 def init_db():
     global HAS_THREAD_COL
     conn = get_conn()
     try:
         cur = conn.cursor()
-        
-        # 1) Создаём таблицы, если их нет
         cur.execute("""
         CREATE TABLE IF NOT EXISTS allowed_users (
           user_id BIGINT PRIMARY KEY
@@ -162,7 +148,7 @@ def init_db():
         """)
         conn.commit()
 
-        # 2) Добавляем колонку message_thread_id, если её нет
+        # добавить message_thread_id, если ещё нет
         try:
             cur.execute(
                 "ALTER TABLE reminders "
@@ -171,12 +157,9 @@ def init_db():
             conn.commit()
         except psycopg2.errors.InsufficientPrivilege:
             conn.rollback()
-            logger.warning(
-                "Нет прав на ALTER TABLE reminders ADD COLUMN message_thread_id — пропускаем."
-            )
+            logger.warning("Нет прав на добавление message_thread_id — пропускаем.")
 
-        # 3) Миграция day_of_week из VARCHAR(10) в TEXT
-        #    Преобразуем старую колонку (если она была VARCHAR) в TEXT.
+        # убедиться, что day_of_week уже TEXT
         try:
             cur.execute(
                 "ALTER TABLE reminders "
@@ -184,34 +167,27 @@ def init_db():
                 "USING day_of_week::text"
             )
             conn.commit()
-            logger.info("Поле day_of_week успешно преобразовано в TEXT.")
         except psycopg2.errors.InsufficientPrivilege:
             conn.rollback()
             logger.warning(
-                "Не хватает прав на изменение типа day_of_week. "
-                "Попросите DBA выполнить:\n"
+                "Нет прав на изменение day_of_week — "
+                "выполните вручную:\n"
                 "  ALTER TABLE reminders ALTER COLUMN day_of_week TYPE TEXT USING day_of_week::text;"
             )
         except Exception as e:
             conn.rollback()
-            logger.error("Не удалось выполнить ALTER COLUMN day_of_week: %s", e)
+            logger.error("Ошибка миграции day_of_week: %s", e)
 
-        # 4) Проверяем наличие столбца message_thread_id
         cur.execute("""
-          SELECT 1
-            FROM information_schema.columns
+          SELECT 1 FROM information_schema.columns
            WHERE table_name='reminders'
              AND column_name='message_thread_id'
         """)
         HAS_THREAD_COL = cur.fetchone() is not None
-
         cur.close()
     finally:
         put_conn(conn)
 
-
-
-# ——— Проверка доступа пользователя ——————————————————————
 async def is_allowed(user_id: int) -> bool:
     if user_id in ADMIN_IDS:
         return True
@@ -225,7 +201,6 @@ async def is_allowed(user_id: int) -> bool:
     finally:
         put_conn(conn)
 
-# ——— Отправка отложенных напоминаний —————————————————————
 async def send_reminder(chat_id: int, thread_id: int|None, text: str):
     kwargs = {"chat_id": chat_id, "text": text}
     if thread_id is not None:
@@ -233,7 +208,6 @@ async def send_reminder(chat_id: int, thread_id: int|None, text: str):
     msg = await application.bot.send_message(**kwargs)
     schedule_deletion(msg.chat_id, msg.message_id)
 
-# ——— Загрузка и регистрация задач ——————————————————————
 def load_jobs():
     conn = get_conn()
     try:
@@ -312,32 +286,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-async def location_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    loc = update.message.location
-    if not loc:
-        return
-    tz_str = tf.timezone_at(lat=loc.latitude, lng=loc.longitude) or "UTC"
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-          INSERT INTO user_timezones(user_id, timezone)
-            VALUES(%s, %s)
-          ON CONFLICT(user_id) DO UPDATE SET timezone = EXCLUDED.timezone
-        """, (update.effective_user.id, tz_str))
-        conn.commit()
-        cur.close()
-    finally:
-        put_conn(conn)
-
-    chat_id = update.effective_chat.id
-    await ctx.bot.send_message(**with_thread({
-        "chat_id": chat_id,
-        "text": f"Часовой пояс установлен: {tz_str}",
-        "reply_markup": get_main_keyboard()
-    }, update))
-    schedule_deletion(chat_id, update.message.message_id)
-
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
@@ -373,8 +321,7 @@ async def list_reminders(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         uid     = update.effective_user.id
         try:
             await ctx.bot.delete_message(chat_id, update.message.message_id)
-        except:
-            pass
+        except: pass
 
     if not await is_allowed(uid):
         msg = await ctx.bot.send_message(**with_thread({
@@ -426,8 +373,10 @@ async def add_user(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("INSERT INTO allowed_users(user_id) VALUES(%s) ON CONFLICT DO NOTHING",
-                    (new_id,))
+        cur.execute(
+            "INSERT INTO allowed_users(user_id) VALUES(%s) ON CONFLICT DO NOTHING",
+            (new_id,)
+        )
         conn.commit()
         cur.close()
     finally:
@@ -469,8 +418,7 @@ async def start_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         uid     = update.effective_user.id
         try:
             await ctx.bot.delete_message(chat_id, update.message.message_id)
-        except:
-            pass
+        except: pass
 
     if not await is_allowed(uid):
         msg = await ctx.bot.send_message(chat_id=chat_id,
@@ -500,21 +448,18 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ADD_INPUT
 
     day_raw, time_str, rem_text = parts
-
-    # --- новая проверка дня недели ---
     if day_raw.isdigit():
         day = NUM_TO_RU_DAY.get(day_raw)
         if not day:
             msg = await ctx.bot.send_message(**with_thread({
                 "chat_id": update.effective_chat.id,
-                "text": "Неверный номер дня недели. Введите 1–7 (1=пн,…,7=вс) или название дня.",
+                "text": "Неверный номер дня. Введите 1–7 или название дня.",
                 "reply_markup": get_main_keyboard()
             }, update))
             schedule_deletion(msg.chat_id, msg.message_id)
             return ADD_INPUT
     else:
         day = day_raw.lower()
-
     if day not in RU_TO_CRON_DAY:
         msg = await ctx.bot.send_message(**with_thread({
             "chat_id": update.effective_chat.id,
@@ -523,7 +468,6 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         }, update))
         schedule_deletion(msg.chat_id, msg.message_id)
         return ADD_INPUT
-    # --- конец новой проверки ---
 
     try:
         hh, mm = map(int, time_str.split(":"))
@@ -542,12 +486,12 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     thread_id = ctx.user_data.get("thread_id")
 
     if HAS_THREAD_COL:
-        sql    = ("INSERT INTO reminders(user_id,chat_id,message_thread_id,"
-                  "day_of_week,time,text) VALUES(%s,%s,%s,%s,%s,%s) RETURNING id")
+        sql = ("INSERT INTO reminders(user_id,chat_id,message_thread_id,"
+               "day_of_week,time,text) VALUES(%s,%s,%s,%s,%s,%s) RETURNING id")
         params = (uid, chat_id, thread_id, day, time_str, rem_text)
     else:
-        sql    = ("INSERT INTO reminders(user_id,chat_id,day_of_week,time,text)"
-                  " VALUES(%s,%s,%s,%s,%s) RETURNING id")
+        sql = ("INSERT INTO reminders(user_id,chat_id,day_of_week,time,text)"
+               " VALUES(%s,%s,%s,%s,%s) RETURNING id")
         params = (uid, chat_id, day, time_str, rem_text)
 
     conn = get_conn()
@@ -560,6 +504,7 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     finally:
         put_conn(conn)
 
+    # получить timezone
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -598,8 +543,7 @@ async def start_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         uid     = update.effective_user.id
         try:
             await ctx.bot.delete_message(chat_id, update.message.message_id)
-        except:
-            pass
+        except: pass
 
     if not await is_allowed(uid):
         msg = await ctx.bot.send_message(chat_id=chat_id,
@@ -630,7 +574,6 @@ async def delete_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     rid       = int(txt)
     uid       = update.effective_user.id
     chat_id   = update.effective_chat.id
-    thread_id = ctx.user_data.get("thread_id")
 
     conn = get_conn()
     try:
@@ -669,6 +612,7 @@ async def delete_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # общий хендлер отмены (cancel, /start, /help)
     if update.message:
         try:
             await ctx.bot.delete_message(update.effective_chat.id,
@@ -698,56 +642,62 @@ if __name__ == "__main__":
         .build()
     )
 
-    # Основные хендлеры
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help",  help_cmd))
-    application.add_handler(MessageHandler(filters.LOCATION, location_handler))
-
-    # ConversationHandler для добавления
+    # Сначала ConversationHandler'ы (чтобы entry-points работали первыми)
     add_conv = ConversationHandler(
         entry_points=[
             CommandHandler("add", start_add),
             MessageHandler(filters.Regex(r"^Добавить$"), start_add),
             CallbackQueryHandler(start_add, pattern="^add$")
         ],
-        states={ADD_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_input)]},
-            fallbacks=[
-        CommandHandler("cancel", cancel),
-        CommandHandler("start", cancel),
-        CommandHandler("help",  cancel),
-    ],
-
-        per_chat=True, per_user=True
+        states={
+            ADD_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, add_input)
+            ]
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CommandHandler("start",  cancel),
+            CommandHandler("help",   cancel),
+        ],
+        per_chat=True, per_user=True,
+        allow_reentry=True
     )
-    application.add_handler(add_conv)
-
-    # ConversationHandler для удаления
     del_conv = ConversationHandler(
         entry_points=[
             CommandHandler("delete", start_delete),
             MessageHandler(filters.Regex(r"^Удалить$"), start_delete),
             CallbackQueryHandler(start_delete, pattern="^delete$")
         ],
-        states={DELETE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_input)]},
-            fallbacks=[
-        CommandHandler("cancel", cancel),
-        CommandHandler("start", cancel),
-        CommandHandler("help",  cancel),
-    ],
-
-        per_chat=True, per_user=True
+        states={
+            DELETE_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, delete_input)
+            ]
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CommandHandler("start",  cancel),
+            CommandHandler("help",   cancel),
+        ],
+        per_chat=True, per_user=True,
+        allow_reentry=True
     )
+
+    application.add_handler(add_conv)
     application.add_handler(del_conv)
 
-    # Список и Помощь
+    # Основные хендлеры
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help",  help_cmd))
+    application.add_handler(MessageHandler(filters.LOCATION, location_handler))
+
+    # Список и inline-кнопки
     application.add_handler(MessageHandler(filters.Regex(r"^Список$"), list_reminders))
     application.add_handler(CallbackQueryHandler(list_reminders, pattern="^list$"))
-    application.add_handler(MessageHandler(filters.Regex(r"^Помощь$"), help_cmd))
     application.add_handler(CallbackQueryHandler(help_cmd,      pattern="^help$"))
 
     # Админские команды
-    application.add_handler(CommandHandler("list",     list_reminders))
-    application.add_handler(CommandHandler("adduser",  add_user))
-    application.add_handler(CommandHandler("removeuser", remove_user))
+    application.add_handler(CommandHandler("list",      list_reminders))
+    application.add_handler(CommandHandler("adduser",   add_user))
+    application.add_handler(CommandHandler("removeuser",remove_user))
 
     application.run_polling()
