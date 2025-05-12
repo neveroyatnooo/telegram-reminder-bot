@@ -136,7 +136,7 @@ def init_db():
                                    ON DELETE CASCADE,
           chat_id             BIGINT NOT NULL,
           message_thread_id   BIGINT,
-          day_of_week         VARCHAR(20)    NOT NULL,
+          day_of_week         TEXT    NOT NULL,
           time                TIME    NOT NULL,
           text                TEXT    NOT NULL
         );
