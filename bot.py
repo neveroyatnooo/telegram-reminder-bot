@@ -43,6 +43,18 @@ RU_TO_CRON_DAY = {
     "воскресенье": "sun"
 }
 
+# Поддержка числовых дней недели (1=понедельник…6=суббота, 7/0=воскресенье)
+NUM_TO_RU_DAY = {
+    "1": "понедельник",
+    "2": "вторник",
+    "3": "среда",
+    "4": "четверг",
+    "5": "пятница",
+    "6": "суббота",
+    "7": "воскресенье",
+    "0": "воскресенье",
+}
+
 # ——— Флаг наличия столбца message_thread_id ————————————————
 HAS_THREAD_COL = False
 
@@ -104,7 +116,7 @@ db_pool = ThreadedConnectionPool(
 def get_conn(): return db_pool.getconn()
 def put_conn(conn): db_pool.putconn(conn)
 
-# ——— Планировщик АПСcheduler ——————————————————————————
+# ——— Планировщик APScheduler ——————————————————————————
 scheduler = AsyncIOScheduler()
 DELETE_DELAY_HOURS = 2
 ADD_INPUT, DELETE_INPUT = range(2)
@@ -211,7 +223,6 @@ def load_jobs():
                 LEFT JOIN user_timezones ut ON r.user_id = ut.user_id
             """)
             tmp = cur.fetchall()
-            # Подставить None на место thread_id
             rows = [(rid, d, tm, txt, cid, None, tz) for (rid,d,tm,txt,cid,tz) in tmp]
         cur.close()
     finally:
@@ -232,7 +243,6 @@ def load_jobs():
 # ——— Handlers ——————————————————————————————————————
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # Приветствие и выбор действий
     tzrec = None
     conn = get_conn()
     try:
@@ -264,7 +274,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "reply_markup": INLINE_KB
         }, update))
 
-    # Удалить команду /start
     try:
         await ctx.bot.delete_message(chat_id, update.message.message_id)
     except:
@@ -331,7 +340,8 @@ async def list_reminders(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         uid     = update.effective_user.id
         try:
             await ctx.bot.delete_message(chat_id, update.message.message_id)
-        except: pass
+        except:
+            pass
 
     if not await is_allowed(uid):
         msg = await ctx.bot.send_message(**with_thread({
@@ -426,19 +436,17 @@ async def start_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         uid     = update.effective_user.id
         try:
             await ctx.bot.delete_message(chat_id, update.message.message_id)
-        except: pass
+        except:
+            pass
 
     if not await is_allowed(uid):
         msg = await ctx.bot.send_message(chat_id=chat_id,
                                          text="Доступ запрещён.",
-                                         reply_markup=get_main_keyboard(),
-        )
+                                         reply_markup=get_main_keyboard())
         schedule_deletion(msg.chat_id, msg.message_id)
         return ConversationHandler.END
 
-    # Сохраняем тему
     ctx.user_data["thread_id"] = get_thread_id(update)
-
     msg = await ctx.bot.send_message(**with_thread({
         "chat_id": chat_id,
         "text": "Введите напоминание в формате:\n<день недели> <HH:MM> <текст>"
@@ -458,8 +466,22 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         schedule_deletion(msg.chat_id, msg.message_id)
         return ADD_INPUT
 
-    day, time_str, rem_text = parts
-    day = day.lower()
+    day_raw, time_str, rem_text = parts
+
+    # --- новая проверка дня недели ---
+    if day_raw.isdigit():
+        day = NUM_TO_RU_DAY.get(day_raw)
+        if not day:
+            msg = await ctx.bot.send_message(**with_thread({
+                "chat_id": update.effective_chat.id,
+                "text": "Неверный номер дня недели. Введите 1–7 (1=пн,…,7=вс) или название дня.",
+                "reply_markup": get_main_keyboard()
+            }, update))
+            schedule_deletion(msg.chat_id, msg.message_id)
+            return ADD_INPUT
+    else:
+        day = day_raw.lower()
+
     if day not in RU_TO_CRON_DAY:
         msg = await ctx.bot.send_message(**with_thread({
             "chat_id": update.effective_chat.id,
@@ -468,6 +490,7 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         }, update))
         schedule_deletion(msg.chat_id, msg.message_id)
         return ADD_INPUT
+    # --- конец новой проверки ---
 
     try:
         hh, mm = map(int, time_str.split(":"))
@@ -485,7 +508,6 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id   = update.effective_chat.id
     thread_id = ctx.user_data.get("thread_id")
 
-    # Сохраняем напоминание в БД
     if HAS_THREAD_COL:
         sql    = ("INSERT INTO reminders(user_id,chat_id,message_thread_id,"
                   "day_of_week,time,text) VALUES(%s,%s,%s,%s,%s,%s) RETURNING id")
@@ -505,7 +527,6 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     finally:
         put_conn(conn)
 
-    # Получить часовой пояс
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -516,7 +537,6 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         put_conn(conn)
     tz = tzrow[0] if tzrow else "UTC"
 
-    # Запланировать напоминание
     scheduler.add_job(
         send_reminder,
         trigger="cron",
@@ -545,19 +565,17 @@ async def start_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         uid     = update.effective_user.id
         try:
             await ctx.bot.delete_message(chat_id, update.message.message_id)
-        except: pass
+        except:
+            pass
 
     if not await is_allowed(uid):
         msg = await ctx.bot.send_message(chat_id=chat_id,
                                          text="Доступ запрещён.",
-                                         reply_markup=get_main_keyboard()
-        )
+                                         reply_markup=get_main_keyboard())
         schedule_deletion(msg.chat_id, msg.message_id)
         return ConversationHandler.END
 
-    # Сохраняем тему
     ctx.user_data["thread_id"] = get_thread_id(update)
-
     msg = await ctx.bot.send_message(**with_thread({
         "chat_id": chat_id,
         "text": "Введите ID напоминания для удаления:"
@@ -576,9 +594,9 @@ async def delete_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         schedule_deletion(msg.chat_id, msg.message_id)
         return DELETE_INPUT
 
-    rid     = int(txt)
-    uid     = update.effective_user.id
-    chat_id = update.effective_chat.id
+    rid       = int(txt)
+    uid       = update.effective_user.id
+    chat_id   = update.effective_chat.id
     thread_id = ctx.user_data.get("thread_id")
 
     conn = get_conn()
