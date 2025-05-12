@@ -140,7 +140,8 @@ def init_db():
     conn = get_conn()
     try:
         cur = conn.cursor()
-        # создаём таблицы, если их нет
+        
+        # 1) Создаём таблицы, если их нет
         cur.execute("""
         CREATE TABLE IF NOT EXISTS allowed_users (
           user_id BIGINT PRIMARY KEY
@@ -161,45 +162,53 @@ def init_db():
         """)
         conn.commit()
 
-        # добавляем колонку message_thread_id, если надо
+        # 2) Добавляем колонку message_thread_id, если её нет
         try:
             cur.execute(
-              "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS message_thread_id BIGINT"
-            )
-            conn.commit()
-        except psycopg2.errors.InsufficientPrivilege:
-            conn.rollback()
-            logger.warning("Нет прав на ALTER TABLE reminders — пропускаем")
-
-        # ИСПРАВЛЕНИЕ: переводим day_of_week в TEXT,
-        # чтобы убрать ограничение VARCHAR(10)
-        try:
-            cur.execute(
-                "ALTER TABLE reminders ALTER COLUMN day_of_week TYPE TEXT"
+                "ALTER TABLE reminders "
+                "ADD COLUMN IF NOT EXISTS message_thread_id BIGINT"
             )
             conn.commit()
         except psycopg2.errors.InsufficientPrivilege:
             conn.rollback()
             logger.warning(
-                "Нет прав на изменение типа поля day_of_week; "
-                "выполните вручную:\n"
-                "  ALTER TABLE reminders ALTER COLUMN day_of_week TYPE TEXT"
+                "Нет прав на ALTER TABLE reminders ADD COLUMN message_thread_id — пропускаем."
+            )
+
+        # 3) Миграция day_of_week из VARCHAR(10) в TEXT
+        #    Преобразуем старую колонку (если она была VARCHAR) в TEXT.
+        try:
+            cur.execute(
+                "ALTER TABLE reminders "
+                "ALTER COLUMN day_of_week TYPE TEXT "
+                "USING day_of_week::text"
+            )
+            conn.commit()
+            logger.info("Поле day_of_week успешно преобразовано в TEXT.")
+        except psycopg2.errors.InsufficientPrivilege:
+            conn.rollback()
+            logger.warning(
+                "Не хватает прав на изменение типа day_of_week. "
+                "Попросите DBA выполнить:\n"
+                "  ALTER TABLE reminders ALTER COLUMN day_of_week TYPE TEXT USING day_of_week::text;"
             )
         except Exception as e:
             conn.rollback()
-            logger.error("Не удалось ALTER COLUMN day_of_week: %s", e)
+            logger.error("Не удалось выполнить ALTER COLUMN day_of_week: %s", e)
 
-        # проверяем, есть ли у нас колонка message_thread_id
+        # 4) Проверяем наличие столбца message_thread_id
         cur.execute("""
-          SELECT 1 FROM information_schema.columns
+          SELECT 1
+            FROM information_schema.columns
            WHERE table_name='reminders'
              AND column_name='message_thread_id'
         """)
         HAS_THREAD_COL = cur.fetchone() is not None
-        cur.close()
 
+        cur.close()
     finally:
         put_conn(conn)
+
 
 
 # ——— Проверка доступа пользователя ——————————————————————
