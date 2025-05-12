@@ -625,15 +625,15 @@ application.add_handler(del_conv)
         # … регистрация всех ConversationHandler-ов …
 
     # Список и Помощь
-    application.add_handler(MessageHandler(filters.Regex(r"^Список$"), list_reminders))
-    application.add_handler(MessageHandler(filters.Regex(r"^Помощь$"), help_cmd))
-    application.add_handler(CallbackQueryHandler(list_reminders, pattern="^list$"))
-    application.add_handler(CallbackQueryHandler(help_cmd,      pattern="^help$"))
+application.add_handler(MessageHandler(filters.Regex(r"^Список$"), list_reminders))
+application.add_handler(MessageHandler(filters.Regex(r"^Помощь$"), help_cmd))
+application.add_handler(CallbackQueryHandler(list_reminders, pattern="^list$"))
+application.add_handler(CallbackQueryHandler(help_cmd,      pattern="^help$"))
 
     # Админские команды
-    application.add_handler(CommandHandler("list",      list_reminders))
-    application.add_handler(CommandHandler("adduser",   add_user))
-    application.add_handler(CommandHandler("removeuser",remove_user))
+application.add_handler(CommandHandler("list",      list_reminders))
+application.add_handler(CommandHandler("adduser",   add_user))
+application.add_handler(CommandHandler("removeuser",remove_user))
 
-    application.run_polling()
+application.run_polling()
 
