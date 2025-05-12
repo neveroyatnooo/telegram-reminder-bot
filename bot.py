@@ -195,20 +195,43 @@ def load_jobs():
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("""
-          SELECT r.id, r.day_of_week, r.time, r.text,
-                 r.chat_id, r.message_thread_id,
-                 COALESCE(ut.timezone,'UTC')
-          FROM reminders r
-          LEFT JOIN user_timezones ut ON r.user_id = ut.user_id
-        """)
-        rows = cur.fetchall()
+        try:
+            # Пробуем получить и thread_id
+            cur.execute("""
+              SELECT r.id, r.day_of_week, r.time, r.text,
+                     r.chat_id, r.message_thread_id,
+                     COALESCE(ut.timezone,'UTC')
+              FROM reminders r
+              LEFT JOIN user_timezones ut ON r.user_id = ut.user_id
+            """)
+            rows = cur.fetchall()
+        except psycopg2.errors.UndefinedColumn:
+            # Если колонки нет — откатываем и запрашиваем без неё
+            conn.rollback()
+            cur.execute("""
+              SELECT r.id, r.day_of_week, r.time, r.text,
+                     r.chat_id,
+                     COALESCE(ut.timezone,'UTC')
+              FROM reminders r
+              LEFT JOIN user_timezones ut ON r.user_id = ut.user_id
+            """)
+            rows_raw = cur.fetchall()
+            # Преобразуем в формат с 7 полями, подставив None для thread_id
+            rows = [
+                (rid, day, tm, txt, cid, None, tz)
+                for (rid, day, tm, txt, cid, tz) in rows_raw
+            ]
+
         cur.close()
     finally:
         put_conn(conn)
 
     for rid, day, tm, txt, cid, thr_id, tz in rows:
-        hh, mm = (tm.hour, tm.minute) if hasattr(tm, 'hour') else map(int, tm.split(":"))
+        # tm — это либо datetime.time, либо строка "HH:MM"
+        if hasattr(tm, "hour"):
+            hh, mm = tm.hour, tm.minute
+        else:
+            hh, mm = map(int, tm.split(":"))
         scheduler.add_job(
             send_reminder,
             trigger="cron",
