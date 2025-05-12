@@ -5,6 +5,7 @@ import os
 import logging
 import datetime
 import asyncio
+import psycopg2.errors
 from datetime import timedelta, timezone
 from pathlib import Path
 
@@ -122,19 +123,22 @@ def init_db():
     conn = get_conn()
     try:
         cur = conn.cursor()
-        # — создаём таблицы если их нет
+
+        # 1) создаём таблицы, если их нет
         cur.execute("""
         CREATE TABLE IF NOT EXISTS allowed_users (
           user_id BIGINT PRIMARY KEY
         );
         CREATE TABLE IF NOT EXISTS reminders (
-          id                 SERIAL PRIMARY KEY,
-          user_id            BIGINT NOT NULL REFERENCES allowed_users(user_id) ON DELETE CASCADE,
-          chat_id            BIGINT NOT NULL,
-          message_thread_id  BIGINT,
-          day_of_week        TEXT    NOT NULL,
-          time               TIME    NOT NULL,
-          text               TEXT    NOT NULL
+          id                  SERIAL PRIMARY KEY,
+          user_id             BIGINT NOT NULL
+                                 REFERENCES allowed_users(user_id)
+                                   ON DELETE CASCADE,
+          chat_id             BIGINT NOT NULL,
+          message_thread_id   BIGINT,
+          day_of_week         TEXT    NOT NULL,
+          time                TIME    NOT NULL,
+          text                TEXT    NOT NULL
         );
         CREATE TABLE IF NOT EXISTS user_timezones (
           user_id  BIGINT PRIMARY KEY,
@@ -143,13 +147,18 @@ def init_db():
         """)
         conn.commit()
 
-        # — если у вас уже была старая таблица reminders с VARCHAR(10) —
-        #   сменим тип day_of_week на TEXT
-        cur.execute("""
-        ALTER TABLE reminders
-          ALTER COLUMN day_of_week TYPE TEXT
-        """)
-        conn.commit()
+        # 2) пытаемся добавить колонку, если её нет, но игнорируем
+        #    ошибки прав доступа
+        try:
+            cur.execute("""
+            ALTER TABLE reminders
+            ADD COLUMN IF NOT EXISTS message_thread_id BIGINT
+            """)
+            conn.commit()
+        except psycopg2.errors.InsufficientPrivilege as e:
+            logger.warning(
+                "Нет прав на ALTER TABLE reminders – пропускаем: %s", e)
+            conn.rollback()
 
         cur.close()
     finally:
