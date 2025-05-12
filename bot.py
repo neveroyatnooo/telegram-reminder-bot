@@ -711,7 +711,12 @@ if __name__ == "__main__":
             CallbackQueryHandler(start_add, pattern="^add$")
         ],
         states={ADD_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_input)]},
-        fallbacks=[CommandHandler("cancel", cancel)],
+            fallbacks=[
+        CommandHandler("cancel", cancel),
+        CommandHandler("start", cancel),
+        CommandHandler("help",  cancel),
+    ],
+
         per_chat=True, per_user=True
     )
     application.add_handler(add_conv)
@@ -724,7 +729,12 @@ if __name__ == "__main__":
             CallbackQueryHandler(start_delete, pattern="^delete$")
         ],
         states={DELETE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_input)]},
-        fallbacks=[CommandHandler("cancel", cancel)],
+            fallbacks=[
+        CommandHandler("cancel", cancel),
+        CommandHandler("start", cancel),
+        CommandHandler("help",  cancel),
+    ],
+
         per_chat=True, per_user=True
     )
     application.add_handler(del_conv)
