@@ -139,7 +139,8 @@ def init_db():
     conn = get_conn()
     try:
         cur = conn.cursor()
-        # 1) Создать таблицы, если их нет
+
+        # 1) Создать таблицу allowed_users, reminders и user_timezones
         cur.execute("""
         CREATE TABLE IF NOT EXISTS allowed_users (
           user_id BIGINT PRIMARY KEY
@@ -160,7 +161,16 @@ def init_db():
         """)
         conn.commit()
 
-        # 2) Добавить колонку message_thread_id, если её нет
+        # 1.1) Добавить всех админов в allowed_users,
+        #      чтобы не возникало ошибки FK при вставке напоминания
+        if ADMIN_IDS:
+            cur.executemany(
+                "INSERT INTO allowed_users(user_id) VALUES(%s) ON CONFLICT DO NOTHING",
+                [(aid,) for aid in ADMIN_IDS]
+            )
+            conn.commit()
+
+        # 2) ALTER TABLE reminders ADD COLUMN IF NOT EXISTS message_thread_id
         try:
             cur.execute(
                 "ALTER TABLE reminders "
@@ -171,7 +181,7 @@ def init_db():
             conn.rollback()
             logger.warning("Нет прав на добавление message_thread_id — пропускаем.")
 
-        # 3) Мигрировать day_of_week в TEXT, чтобы убрать VARCHAR(10)
+        # 3) Миграция day_of_week -> TEXT (убираем VARCHAR(10))
         try:
             cur.execute(
                 "ALTER TABLE reminders "
@@ -179,28 +189,30 @@ def init_db():
                 "USING day_of_week::text"
             )
             conn.commit()
-            logger.info("Поле day_of_week успешно преобразовано в TEXT.")
         except psycopg2.errors.InsufficientPrivilege:
             conn.rollback()
             logger.warning(
-                "Нет прав на изменение day_of_week. "
-                "Попросите DBA выполнить:\n"
+                "Нет прав на изменение day_of_week — "
+                "попросите DBA выполнить:\n"
                 "  ALTER TABLE reminders ALTER COLUMN day_of_week TYPE TEXT USING day_of_week::text;"
             )
         except Exception as e:
             conn.rollback()
-            logger.error("Не удалось мигрировать day_of_week: %s", e)
+            logger.error("Ошибка миграции day_of_week: %s", e)
 
-        # 4) Проверить наличие message_thread_id
+        # 4) Проверить, появился ли столбец message_thread_id
         cur.execute("""
-          SELECT 1 FROM information_schema.columns
+          SELECT 1
+            FROM information_schema.columns
            WHERE table_name='reminders'
              AND column_name='message_thread_id'
         """)
         HAS_THREAD_COL = cur.fetchone() is not None
+
         cur.close()
     finally:
         put_conn(conn)
+
 
 # ——— Проверка доступа ——————————————————————————————————
 async def is_allowed(user_id: int) -> bool:
