@@ -356,15 +356,7 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/add — добавить напоминание\n"
         "/list — список напоминаний\n"
         "/delete — удалить напоминание по ID\n\n"
-        "Админ:\n"
-        "/adduser — добавить пользователя\n"
-        "/removeuser — удалить пользователя\n"
-        "/adddeluser — добавить авто-удаление юзера\n"
-        "/removedeluser — убрать авто-удаление юзера\n"
-        "/listdelusers — список авто-удаляемых юзеров\n"
-        "/enableautodel — включить глобальное авто-удаление\n"
-        "/disableautodel — выключить глобальное авто-удаление\n"
-        "/autodelstatus — статус глобального авто-удаления"
+        
     )
     msg = await ctx.bot.send_message(**with_thread({
         "chat_id": chat_id,
