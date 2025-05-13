@@ -825,28 +825,30 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("start",start))
     application.add_handler(MessageHandler(filters.LOCATION,location_handler))
     application.add_handler(CommandHandler("help",help_cmd))
-    application.add_handler(MessageHandler(filters.Regex(r"^Список$"),list_reminders))
-    application.add_handler(CallbackQueryHandler(list_reminders,pattern="^list$"))
-    application.add_handler(CallbackQueryHandler(help_cmd,pattern="^help$"))
 
     
-    application.add_handler(CommandHandler("list",list_reminders))
-    application.add_handler(CommandHandler("adduser",add_user))
-    application.add_handler(CommandHandler("removeuser",remove_user))
-    application.add_handler(CommandHandler("adddeluser",add_auto_del_user))
-    application.add_handler(CommandHandler("removedeluser",remove_auto_del_user))
-    application.add_handler(CommandHandler("listdelusers",list_auto_del_users))
+    application.add_handler(MessageHandler(filters.Regex(r"^Список$"), list_reminders))
     
-
-    application.add_handler(CommandHandler("enableautodel",  enable_autodel_all))
-    application.add_handler(CommandHandler("disableautodel", disable_autodel_all))
-    application.add_handler(CommandHandler("autodelstatus",  status_autodel_all))
+    application.add_handler(MessageHandler(filters.Regex(r"^Помощь$"), help_cmd))
 
     
+    application.add_handler(CallbackQueryHandler(list_reminders, pattern="^list$"))
+    application.add_handler(CallbackQueryHandler(help_cmd,     pattern="^help$"))
+
+    application.add_handler(CommandHandler("list",        list_reminders))
+    application.add_handler(CommandHandler("adduser",     add_user))
+    application.add_handler(CommandHandler("removeuser",  remove_user))
+    application.add_handler(CommandHandler("adddeluser",  add_auto_del_user))
+    application.add_handler(CommandHandler("removedeluser", remove_auto_del_user))
+    application.add_handler(CommandHandler("listdelusers", list_auto_del_users))
+
+    application.add_handler(CommandHandler("enableautodel",   enable_autodel_all))
+    application.add_handler(CommandHandler("disableautodel",  disable_autodel_all))
+    application.add_handler(CommandHandler("autodelstatus",   status_autodel_all))
+
     application.add_handler(CommandHandler("clearchat", clear_chat))
 
     
     application.add_handler(MessageHandler(filters.ALL, delete_user_message), group=99)
 
-    
     application.run_polling()
