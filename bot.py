@@ -125,47 +125,69 @@ def init_db():
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS allowed_users (
-          user_id BIGINT PRIMARY KEY
-        );
-        CREATE TABLE IF NOT EXISTS reminders (
-          id                SERIAL PRIMARY KEY,
-          user_id           BIGINT NOT NULL REFERENCES allowed_users(user_id) ON DELETE CASCADE,
-          chat_id           BIGINT NOT NULL,
-          message_thread_id BIGINT,
-          day_of_week       TEXT    NOT NULL,
-          time              TIME    NOT NULL,
-          text              TEXT    NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS user_timezones (
-          user_id  BIGINT PRIMARY KEY,
-          timezone VARCHAR(50) NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS auto_delete_users (
-          user_id BIGINT PRIMARY KEY
-        );
-        CREATE TABLE IF NOT EXISTS config (
-          key   TEXT PRIMARY KEY,
-          value TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS bot_messages (
-          chat_id    BIGINT NOT NULL,
-          message_id BIGINT NOT NULL
-        );
-        """)
-        conn.commit()
+        # создаём каждую таблицу своим execute
+        ddls = [
+            """
+            CREATE TABLE IF NOT EXISTS allowed_users (
+                user_id BIGINT PRIMARY KEY
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS reminders (
+                id                SERIAL PRIMARY KEY,
+                user_id           BIGINT NOT NULL
+                                    REFERENCES allowed_users(user_id)
+                                    ON DELETE CASCADE,
+                chat_id           BIGINT NOT NULL,
+                message_thread_id BIGINT,
+                day_of_week       TEXT    NOT NULL,
+                time              TIME    NOT NULL,
+                text              TEXT    NOT NULL
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS user_timezones (
+                user_id  BIGINT PRIMARY KEY,
+                timezone VARCHAR(50) NOT NULL
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS auto_delete_users (
+                user_id BIGINT PRIMARY KEY
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS config (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS bot_messages (
+                chat_id    BIGINT NOT NULL,
+                message_id BIGINT NOT NULL
+            );
+            """
+        ]
+        for ddl in ddls:
+            cur.execute(ddl)
+            conn.commit()
+
+        # Заполняем начальные значения
         if ADMIN_IDS:
             cur.executemany(
                 "INSERT INTO allowed_users(user_id) VALUES(%s) ON CONFLICT DO NOTHING",
                 [(aid,) for aid in ADMIN_IDS]
             )
             conn.commit()
+
         cur.execute(
             "INSERT INTO config(key,value) VALUES('auto_delete_enabled','false') "
             "ON CONFLICT(key) DO NOTHING"
         )
         conn.commit()
+
+        # Пытаемся добавить/мигрировать колонку message_thread_id
         try:
             cur.execute(
                 "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS message_thread_id BIGINT"
@@ -174,9 +196,11 @@ def init_db():
         except psycopg2.errors.InsufficientPrivilege:
             conn.rollback()
             logger.warning("Нет прав на добавление message_thread_id — пропускаем")
+
         try:
             cur.execute(
-                "ALTER TABLE reminders ALTER COLUMN day_of_week TYPE TEXT USING day_of_week::text"
+                "ALTER TABLE reminders ALTER COLUMN day_of_week TYPE TEXT "
+                "USING day_of_week::text"
             )
             conn.commit()
         except psycopg2.errors.InsufficientPrivilege:
@@ -188,8 +212,11 @@ def init_db():
         except Exception as e:
             conn.rollback()
             logger.error("Ошибка миграции day_of_week: %s", e)
+
+        # Проверяем, появилась ли колонка
         cur.execute("""
-          SELECT 1 FROM information_schema.columns
+            SELECT 1
+            FROM information_schema.columns
            WHERE table_name='reminders'
              AND column_name='message_thread_id'
         """)
@@ -197,6 +224,7 @@ def init_db():
         cur.close()
     finally:
         put_conn(conn)
+
 
 async def is_allowed(user_id: int) -> bool:
     if user_id in ADMIN_IDS:
