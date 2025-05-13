@@ -262,31 +262,61 @@ def load_jobs():
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("""
-          SELECT r.id, r.day_of_week, r.time, r.text,
-                 r.chat_id, r.message_thread_id,
-                 COALESCE(ut.timezone,'UTC')
-            FROM reminders r
-            LEFT JOIN user_timezones ut ON r.user_id=ut.user_id
-        """)
-        rows = cur.fetchall()
+        if HAS_THREAD_COL:
+            cur.execute("""
+              SELECT r.id,
+                     r.day_of_week,
+                     r.time,
+                     r.text,
+                     r.chat_id,
+                     r.message_thread_id,
+                     COALESCE(ut.timezone,'UTC')
+                FROM reminders r
+                LEFT JOIN user_timezones ut ON r.user_id=ut.user_id
+            """)
+            rows = cur.fetchall()
+        else:
+            # если нет колонки message_thread_id — не пытаемся её читать
+            cur.execute("""
+              SELECT r.id,
+                     r.day_of_week,
+                     r.time,
+                     r.text,
+                     r.chat_id,
+                     COALESCE(ut.timezone,'UTC')
+                FROM reminders r
+                LEFT JOIN user_timezones ut ON r.user_id=ut.user_id
+            """)
+            tmp = cur.fetchall()
+            # подставляем None вместо thread_id
+            rows = [
+                (rid, day, tm, txt, cid, None, tz)
+                for (rid, day, tm, txt, cid, tz) in tmp
+            ]
         cur.close()
     finally:
         put_conn(conn)
 
     for rid, db_days, tm, txt, cid, thr, tz in rows:
+        # db_days может быть "понедельник,среда,пятница"
         parts = [d.strip() for d in db_days.split(",")]
         cron_days = ",".join(RU_TO_CRON_DAY[d] for d in parts)
+
         if hasattr(tm, "hour"):
             hh, mm = tm.hour, tm.minute
         else:
             hh, mm = map(int, str(tm).split(":"))
+
         scheduler.add_job(
-            send_reminder, trigger="cron", id=str(rid),
+            send_reminder,
+            trigger="cron",
+            id=str(rid),
             day_of_week=cron_days,
-            hour=hh, minute=mm, timezone=tz,
+            hour=hh, minute=mm,
+            timezone=tz,
             args=[cid, thr, txt]
         )
+
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     tzrec = None
