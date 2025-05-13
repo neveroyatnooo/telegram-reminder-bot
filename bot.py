@@ -811,7 +811,7 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         put_conn(conn)
     tz = row[0] if row else "UTC"
 
-        scheduler.add_job(
+    scheduler.add_job(
         send_reminder, trigger="cron", id=str(rid),
         day_of_week=cron_days, hour=hh, minute=mm,
         timezone=tz, args=[chat_id, thr, rem_text]
@@ -829,8 +829,9 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         cur.close()
     finally:
         put_conn(conn)
-     pos = all_ids.index(rid) + 1
-     msg = await ctx.bot.send_message(**with_thread({
+    pos = all_ids.index(rid) + 1
+
+    msg = await ctx.bot.send_message(**with_thread({
         "chat_id":chat_id,
         "text":f"Добавлено #{pos}",
         "reply_markup":get_main_keyboard()
