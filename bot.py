@@ -836,9 +836,9 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "text":f"Добавлено #{pos}",
         "reply_markup":get_main_keyboard()
     },update))
-     record_bot_message(msg.chat_id,msg.message_id)
-     schedule_deletion(msg.chat_id,msg.message_id)
-     return ConversationHandler.END
+    record_bot_message(msg.chat_id,msg.message_id)
+    schedule_deletion(msg.chat_id,msg.message_id)
+    return ConversationHandler.END
 
 async def start_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
