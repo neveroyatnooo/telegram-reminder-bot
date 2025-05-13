@@ -347,47 +347,71 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     schedule_deletion(msg.chat_id,msg.message_id)
 
 async def list_reminders(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    
     if update.callback_query:
         await update.callback_query.answer()
-        chat_id=update.callback_query.message.chat_id
-        uid=update.callback_query.from_user.id
+        chat_id = update.callback_query.message.chat_id
+        uid     = update.callback_query.from_user.id
     else:
-        chat_id=update.effective_chat.id
-        uid=update.effective_user.id
-        try: await ctx.bot.delete_message(chat_id,update.message.message_id)
-        except: pass
+        chat_id = update.effective_chat.id
+        uid     = update.effective_user.id
+        try: 
+            await ctx.bot.delete_message(chat_id, update.message.message_id)
+        except: 
+            pass
 
     if not await is_allowed(uid):
-        msg=await ctx.bot.send_message(**with_thread({
-            "chat_id":chat_id,"text":"Доступ запрещён.","reply_markup":get_main_keyboard()
-        },update))
-        record_bot_message(msg.chat_id,msg.message_id)
-        schedule_deletion(msg.chat_id,msg.message_id)
+        msg = await ctx.bot.send_message(**with_thread({
+            "chat_id": chat_id,
+            "text": "Доступ запрещён.",
+            "reply_markup": get_main_keyboard()
+        }, update))
+        record_bot_message(msg.chat_id, msg.message_id)
+        schedule_deletion(msg.chat_id, msg.message_id)
         return
 
-    conn=get_conn()
+    
+    conn = get_conn()
     try:
-        cur=conn.cursor()
+        cur = conn.cursor()
         cur.execute("""
           SELECT id,day_of_week,time,text
             FROM reminders
            WHERE user_id=%s AND chat_id=%s
            ORDER BY id
-        """,(uid,chat_id))
-        rows=cur.fetchall()
+        """, (uid, chat_id))
+        rows = cur.fetchall()
         cur.close()
     finally:
         put_conn(conn)
 
+    
     if not rows:
-        out="Нет напоминаний."
+        chunks = ["Нет напоминаний."]
     else:
-        out="Напоминания:\n" + "\n".join(f"{r[0]}: {r[1]}, {r[2]}, {r[3]}" for r in rows)
-    msg=await ctx.bot.send_message(**with_thread({
-        "chat_id":chat_id,"text":out,"reply_markup":get_main_keyboard()
-    },update))
-    record_bot_message(msg.chat_id,msg.message_id)
-    schedule_deletion(msg.chat_id,msg.message_id)
+        lines = [f"{r[0]}: {r[1]}, {r[2]}, {r[3]}" for r in rows]
+        chunks = []
+        current = "Напоминания:\n"
+        MAX_LEN = 4000  
+        for line in lines:
+            
+            if len(current) + len(line) + 1 > MAX_LEN:
+                chunks.append(current)
+                current = ""
+            current += line + "\n"
+        if current:
+            chunks.append(current)
+
+    
+    for chunk in chunks:
+        msg = await ctx.bot.send_message(**with_thread({
+            "chat_id": chat_id,
+            "text": chunk,
+            "reply_markup": get_main_keyboard()
+        }, update))
+        record_bot_message(msg.chat_id, msg.message_id)
+        schedule_deletion(msg.chat_id, msg.message_id)
+
 
 async def add_user(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS: return
