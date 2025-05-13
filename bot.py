@@ -811,20 +811,33 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         put_conn(conn)
     tz = row[0] if row else "UTC"
 
-    scheduler.add_job(
+        scheduler.add_job(
         send_reminder, trigger="cron", id=str(rid),
         day_of_week=cron_days, hour=hh, minute=mm,
         timezone=tz, args=[chat_id, thr, rem_text]
     )
 
-    msg = await ctx.bot.send_message(**with_thread({
+    # --- вычисляем порядковый номер в списке, а не SERIAL-id ---
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id FROM reminders WHERE user_id=%s AND chat_id=%s ORDER BY id",
+            (uid, chat_id)
+        )
+        all_ids = [row[0] for row in cur.fetchall()]
+        cur.close()
+    finally:
+        put_conn(conn)
+     pos = all_ids.index(rid) + 1
+     msg = await ctx.bot.send_message(**with_thread({
         "chat_id":chat_id,
-        "text":f"Добавлено #{rid}",
+        "text":f"Добавлено #{pos}",
         "reply_markup":get_main_keyboard()
-    }, update))
-    record_bot_message(msg.chat_id, msg.message_id)
-    schedule_deletion(msg.chat_id, msg.message_id)
-    return ConversationHandler.END
+    },update))
+     record_bot_message(msg.chat_id,msg.message_id)
+     schedule_deletion(msg.chat_id,msg.message_id)
+     return ConversationHandler.END
 
 async def start_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
