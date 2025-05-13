@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 import os
 import logging
 import datetime
@@ -76,6 +75,7 @@ INLINE_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("Помощь",   callback_data="help")],
 ])
 
+# ——— Загрузка .env ————————————————————————————————————
 env = Path(__file__).parent / ".env"
 load_dotenv(env)
 
@@ -87,12 +87,11 @@ DB_USER     = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 ADMIN_IDS   = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.isdigit()}
 
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s",
+                    level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ——— Пул соединений PostgreSQL —————————————————————————
 db_pool = ThreadedConnectionPool(
     1, 10,
     host=DB_HOST, port=DB_PORT,
@@ -102,8 +101,11 @@ db_pool = ThreadedConnectionPool(
 def get_conn(): return db_pool.getconn()
 def put_conn(conn): db_pool.putconn(conn)
 
+# ——— Планировщик APScheduler ——————————————————————————
 scheduler = AsyncIOScheduler()
-DELETE_DELAY_MINUTES = 2
+
+# время до удаления (минуты)
+DELETE_DELAY_MINUTES = 5
 
 async def delete_msg(chat_id: int, message_id: int):
     try:
@@ -116,17 +118,18 @@ async def delete_msg(chat_id: int, message_id: int):
 def schedule_deletion(chat_id: int, message_id: int,
                       delay_minutes: int = DELETE_DELAY_MINUTES):
     run_date = datetime.datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)
-    
     scheduler.add_job(delete_msg, trigger="date", run_date=run_date,
                       args=[chat_id, message_id])
 
 tf = TimezoneFinder()
 
+# ——— Инициализация и миграция схемы ——————————————————————
 def init_db():
     global HAS_THREAD_COL
     conn = get_conn()
     try:
         cur = conn.cursor()
+        # 1) Создать таблицы
         cur.execute("""
         CREATE TABLE IF NOT EXISTS allowed_users (
           user_id BIGINT PRIMARY KEY
@@ -144,16 +147,32 @@ def init_db():
           user_id  BIGINT PRIMARY KEY,
           timezone VARCHAR(50) NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS auto_delete_users (
+          user_id BIGINT PRIMARY KEY
+        );
+        CREATE TABLE IF NOT EXISTS config (
+          key   TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
         """)
         conn.commit()
-        # добавить админов в allowed_users
+
+        # 1.1) Инициализировать allowed_users админами
         if ADMIN_IDS:
             cur.executemany(
                 "INSERT INTO allowed_users(user_id) VALUES(%s) ON CONFLICT DO NOTHING",
                 [(aid,) for aid in ADMIN_IDS]
             )
             conn.commit()
-        # добавить message_thread_id если нет
+
+        # 1.2) Инициализировать config для автоудаления
+        cur.execute(
+            "INSERT INTO config(key,value) VALUES('auto_delete_enabled','false') "
+            "ON CONFLICT(key) DO NOTHING"
+        )
+        conn.commit()
+
+        # 2) Добавить message_thread_id если нет
         try:
             cur.execute(
                 "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS message_thread_id BIGINT"
@@ -162,13 +181,13 @@ def init_db():
         except psycopg2.errors.InsufficientPrivilege:
             conn.rollback()
             logger.warning("Нет прав на добавление message_thread_id — пропускаем.")
-        # миграция day_of_week в TEXT
+
+        # 3) Миграция day_of_week -> TEXT
         try:
             cur.execute(
                 "ALTER TABLE reminders ALTER COLUMN day_of_week TYPE TEXT USING day_of_week::text"
             )
             conn.commit()
-            logger.info("Поле day_of_week преобразовано в TEXT.")
         except psycopg2.errors.InsufficientPrivilege:
             conn.rollback()
             logger.warning(
@@ -179,7 +198,8 @@ def init_db():
         except Exception as e:
             conn.rollback()
             logger.error("Ошибка миграции day_of_week: %s", e)
-        # проверить наличие message_thread_id
+
+        # 4) Проверить наличие message_thread_id
         cur.execute("""
           SELECT 1 FROM information_schema.columns
            WHERE table_name='reminders'
@@ -190,6 +210,7 @@ def init_db():
     finally:
         put_conn(conn)
 
+# ——— Проверка доступа ——————————————————————————————————
 async def is_allowed(user_id: int) -> bool:
     if user_id in ADMIN_IDS:
         return True
@@ -203,6 +224,19 @@ async def is_allowed(user_id: int) -> bool:
     finally:
         put_conn(conn)
 
+# ——— Глобальный чек статуса автоудаления ——————————————————
+def global_autodel_enabled() -> bool:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM config WHERE key='auto_delete_enabled'")
+        row = cur.fetchone()
+        cur.close()
+        return bool(row and row[0] == 'true')
+    finally:
+        put_conn(conn)
+
+# ——— Отправка отложенных напоминаний —————————————————————
 async def send_reminder(chat_id: int, thread_id: int|None, text: str):
     kwargs = {"chat_id": chat_id, "text": text}
     if thread_id is not None:
@@ -210,6 +244,7 @@ async def send_reminder(chat_id: int, thread_id: int|None, text: str):
     msg = await application.bot.send_message(**kwargs)
     schedule_deletion(msg.chat_id, msg.message_id)
 
+# ——— Загрузка задач из БД ————————————————————————————
 def load_jobs():
     conn = get_conn()
     try:
@@ -237,10 +272,7 @@ def load_jobs():
     finally:
         put_conn(conn)
     for rid, d, tm, txt, cid, thr, tz in rows:
-        if hasattr(tm, "hour"):
-            hh, mm = tm.hour, tm.minute
-        else:
-            hh, mm = map(int, tm.split(":"))
+        hh, mm = (tm.hour, tm.minute) if hasattr(tm, "hour") else map(int, tm.split(":"))
         scheduler.add_job(
             send_reminder, trigger="cron", id=str(rid),
             day_of_week=RU_TO_CRON_DAY[d],
@@ -277,7 +309,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         }, update))
         await ctx.bot.send_message(**with_thread({
             "chat_id": chat_id,
-            "text": "Или нажмите кнопку:",
+            "text": "Или нажмите на inline-кнопку:",
             "reply_markup": INLINE_KB
         }, update))
     try:
@@ -320,11 +352,19 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except:
         pass
     text = (
-      "Команды:\n"
-      "/add — добавить напоминание\n"
-      "/list — список напоминаний\n"
-      "/delete — удалить напоминание по ID\n\n"
-      
+        "Команды:\n"
+        "/add — добавить напоминание\n"
+        "/list — список напоминаний\n"
+        "/delete — удалить напоминание по ID\n\n"
+        "Админ:\n"
+        "/adduser — добавить пользователя\n"
+        "/removeuser — удалить пользователя\n"
+        "/adddeluser — добавить авто-удаление юзера\n"
+        "/removedeluser — убрать авто-удаление юзера\n"
+        "/listdelusers — список авто-удаляемых юзеров\n"
+        "/enableautodel — включить глобальное авто-удаление\n"
+        "/disableautodel — выключить глобальное авто-удаление\n"
+        "/autodelstatus — статус глобального авто-удаления"
     )
     msg = await ctx.bot.send_message(**with_thread({
         "chat_id": chat_id,
@@ -366,12 +406,10 @@ async def list_reminders(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         cur.close()
     finally:
         put_conn(conn)
-    if not rows:
-        text = "Нет напоминаний."
-    else:
-        text = "Ваши напоминания:\n" + "\n".join(
-            f"{r[0]} — {r[1]}, {r[2]}, {r[3]}" for r in rows
-        )
+    text = "Нет напоминаний." if not rows else (
+        "Ваши напоминания:\n" +
+        "\n".join(f"{r[0]} — {r[1]}, {r[2]}, {r[3]}" for r in rows)
+    )
     msg = await ctx.bot.send_message(**with_thread({
         "chat_id": chat_id,
         "text": text,
@@ -428,6 +466,100 @@ async def remove_user(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                           reply_markup=get_main_keyboard())
     schedule_deletion(msg.chat_id, msg.message_id)
 
+# ——— Админ: авто-удаление конкретных юзеров ——————————————————
+async def add_auto_del_user(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if not ctx.args or not ctx.args[0].isdigit():
+        await update.message.reply_text("Использование: /adddeluser <user_id>")
+        return
+    target = int(ctx.args[0])
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO auto_delete_users(user_id) VALUES(%s) ON CONFLICT DO NOTHING",
+            (target,)
+        )
+        conn.commit()
+        cur.close()
+    finally:
+        put_conn(conn)
+    await update.message.reply_text(f"Сообщения пользователя {target} будут авто-удаляться.")
+
+async def remove_auto_del_user(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if not ctx.args or not ctx.args[0].isdigit():
+        await update.message.reply_text("Использование: /removedeluser <user_id>")
+        return
+    target = int(ctx.args[0])
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM auto_delete_users WHERE user_id=%s", (target,))
+        conn.commit()
+        cur.close()
+    finally:
+        put_conn(conn)
+    await update.message.reply_text(f"Пользователь {target} удалён из авто-удаления.")
+
+async def list_auto_del_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM auto_delete_users ORDER BY user_id")
+        rows = cur.fetchall()
+        cur.close()
+    finally:
+        put_conn(conn)
+    if not rows:
+        text = "Список авто-удаляемых пользователей пуст."
+    else:
+        text = "Авто-удаление сообщений у:\n" + "\n".join(str(r[0]) for r in rows)
+    await update.message.reply_text(text)
+
+# ——— Админ: глобальный toggle авто-удаления ——————————————————
+async def enable_autodel_all(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE config SET value='true' WHERE key='auto_delete_enabled'"
+        )
+        conn.commit()
+        cur.close()
+    finally:
+        put_conn(conn)
+    await update.message.reply_text("Глобальное авто-удаление ВКЛЮЧЕНО.")
+
+async def disable_autodel_all(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE config SET value='false' WHERE key='auto_delete_enabled'"
+        )
+        conn.commit()
+        cur.close()
+    finally:
+        put_conn(conn)
+    await update.message.reply_text("Глобальное авто-удаление ОТКЛЮЧЕНО.")
+
+async def status_autodel_all(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    enabled = global_autodel_enabled()
+    await update.message.reply_text(
+        f"Глобальное авто-удаление {'ВКЛЮЧЕНО' if enabled else 'ОТКЛЮЧЕНО'}."
+    )
+
 async def start_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
@@ -465,6 +597,7 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         }, update))
         schedule_deletion(msg.chat_id, msg.message_id)
         return ADD_INPUT
+
     day_raw, time_str, rem_text = parts
     if day_raw.isdigit():
         day = NUM_TO_RU_DAY.get(day_raw)
@@ -480,23 +613,25 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         day = day_raw.lower()
     if day not in RU_TO_CRON_DAY:
         msg = await ctx.bot.send_message(**with_thread({
-            "chat_id": update.effective_chat.id,
-            "text": "Неверный день недели.",
-            "reply_markup": get_main_keyboard()
+                "chat_id": update.effective_chat.id,
+                "text": "Неверный день недели.",
+                "reply_markup": get_main_keyboard()
         }, update))
         schedule_deletion(msg.chat_id, msg.message_id)
         return ADD_INPUT
+
     try:
         hh, mm = map(int, time_str.split(":"))
         assert 0 <= hh < 24 and 0 <= mm < 60
     except:
         msg = await ctx.bot.send_message(**with_thread({
-            "chat_id": update.effective_chat.id,
-            "text": "Неверный формат времени.",
-            "reply_markup": get_main_keyboard()
+                "chat_id": update.effective_chat.id,
+                "text": "Неверный формат времени.",
+                "reply_markup": get_main_keyboard()
         }, update))
         schedule_deletion(msg.chat_id, msg.message_id)
         return ADD_INPUT
+
     uid       = update.effective_user.id
     chat_id   = update.effective_chat.id
     thread_id = ctx.user_data.get("thread_id")
@@ -508,6 +643,7 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         sql = ("INSERT INTO reminders(user_id,chat_id,day_of_week,time,text)"
                " VALUES(%s,%s,%s,%s,%s) RETURNING id")
         params = (uid, chat_id, day, time_str, rem_text)
+
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -517,6 +653,7 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         cur.close()
     finally:
         put_conn(conn)
+
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -526,6 +663,7 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     finally:
         put_conn(conn)
     tz = tzrow[0] if tzrow else "UTC"
+
     scheduler.add_job(
         send_reminder,
         trigger="cron",
@@ -535,10 +673,11 @@ async def add_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         timezone=tz,
         args=[chat_id, thread_id, rem_text]
     )
+
     msg = await ctx.bot.send_message(**with_thread({
-        "chat_id": chat_id,
-        "text": f"Напоминание #{rid} добавлено.",
-        "reply_markup": get_main_keyboard()
+            "chat_id": chat_id,
+            "text": f"Напоминание #{rid} добавлено.",
+            "reply_markup": get_main_keyboard()
     }, update))
     schedule_deletion(msg.chat_id, msg.message_id)
     return ConversationHandler.END
@@ -563,8 +702,8 @@ async def start_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     ctx.user_data["thread_id"] = get_thread_id(update)
     msg = await ctx.bot.send_message(**with_thread({
-        "chat_id": chat_id,
-        "text": "Введите ID напоминания для удаления:"
+            "chat_id": chat_id,
+            "text": "Введите ID напоминания для удаления:"
     }, update))
     schedule_deletion(msg.chat_id, msg.message_id)
     return DELETE_INPUT
@@ -573,15 +712,17 @@ async def delete_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text or ""
     if not txt.isdigit():
         msg = await ctx.bot.send_message(**with_thread({
-            "chat_id": update.effective_chat.id,
-            "text": "ID должен быть числом.",
-            "reply_markup": get_main_keyboard()
+                "chat_id": update.effective_chat.id,
+                "text": "ID должен быть числом.",
+                "reply_markup": get_main_keyboard()
         }, update))
         schedule_deletion(msg.chat_id, msg.message_id)
         return DELETE_INPUT
+
     rid     = int(txt)
     uid     = update.effective_user.id
     chat_id = update.effective_chat.id
+
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -592,25 +733,28 @@ async def delete_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if cur.fetchone() is None:
             cur.close()
             msg = await ctx.bot.send_message(**with_thread({
-                "chat_id": chat_id,
-                "text": "Напоминание не найдено.",
-                "reply_markup": get_main_keyboard()
+                    "chat_id": chat_id,
+                    "text": "Напоминание не найдено.",
+                    "reply_markup": get_main_keyboard()
             }, update))
             schedule_deletion(msg.chat_id, msg.message_id)
             return ConversationHandler.END
+
         cur.execute("DELETE FROM reminders WHERE id=%s", (rid,))
         conn.commit()
         cur.close()
     finally:
         put_conn(conn)
+
     try:
         scheduler.remove_job(str(rid))
     except:
         pass
+
     msg = await ctx.bot.send_message(**with_thread({
-        "chat_id": chat_id,
-        "text": f"Напоминание #{rid} удалено.",
-        "reply_markup": get_main_keyboard()
+            "chat_id": chat_id,
+            "text": f"Напоминание #{rid} удалено.",
+            "reply_markup": get_main_keyboard()
     }, update))
     schedule_deletion(msg.chat_id, msg.message_id)
     return ConversationHandler.END
@@ -623,24 +767,40 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except:
             pass
     msg = await ctx.bot.send_message(**with_thread({
-        "chat_id": update.effective_chat.id,
-        "text": "Операция отменена.",
-        "reply_markup": get_main_keyboard()
+            "chat_id": update.effective_chat.id,
+            "text": "Операция отменена.",
+            "reply_markup": get_main_keyboard()
     }, update))
     schedule_deletion(msg.chat_id, msg.message_id)
     return ConversationHandler.END
 
+# ——— Удаление сообщений только у выбранных пользователей ————————
 async def delete_user_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg or not msg.from_user:
         return
-    if msg.from_user.id == ctx.bot.id:
+    # глобальный switch
+    if not global_autodel_enabled():
         return
+    user_id = msg.from_user.id
+    # не удаляем бота
+    if user_id == ctx.bot.id:
+        return
+    # проверяем, включено ли авто-удаление для этого user_id
+    conn = get_conn()
     try:
-        await ctx.bot.delete_message(chat_id=msg.chat_id,
-                                     message_id=msg.message_id)
-    except:
-        pass
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM auto_delete_users WHERE user_id=%s", (user_id,))
+        to_del = cur.fetchone() is not None
+        cur.close()
+    finally:
+        put_conn(conn)
+    if to_del:
+        try:
+            await ctx.bot.delete_message(chat_id=msg.chat_id,
+                                         message_id=msg.message_id)
+        except:
+            pass
 
 async def on_startup(app):
     init_db()
@@ -657,7 +817,7 @@ if __name__ == "__main__":
         .build()
     )
 
-    # ConversationHandlers первым
+    # 1) ConversationHandlers
     add_conv = ConversationHandler(
         entry_points=[
             CommandHandler("add", start_add),
@@ -691,22 +851,32 @@ if __name__ == "__main__":
     application.add_handler(add_conv)
     application.add_handler(del_conv)
 
-    # Основные
-    application.add_handler(CommandHandler("start", start))
+    # 2) Основные хендлеры
+    application.add_handler(CommandHandler("start",  start))
     application.add_handler(MessageHandler(filters.LOCATION, location_handler))
-    application.add_handler(CommandHandler("help",  help_cmd))
+    application.add_handler(CommandHandler("help",   help_cmd))
 
-    # Список и inline
+    # 3) Список и inline-кнопки
     application.add_handler(MessageHandler(filters.Regex(r"^Список$"), list_reminders))
     application.add_handler(CallbackQueryHandler(list_reminders, pattern="^list$"))
-    application.add_handler(CallbackQueryHandler(help_cmd,       pattern="^help$"))
+    application.add_handler(CallbackQueryHandler(help_cmd,        pattern="^help$"))
 
-    # Админ
+    # 4) Админские команды
     application.add_handler(CommandHandler("list",       list_reminders))
     application.add_handler(CommandHandler("adduser",    add_user))
     application.add_handler(CommandHandler("removeuser", remove_user))
 
-    # Удалять все сообщения пользователей
+    # 5) Авто-удаление конкретных юзеров
+    application.add_handler(CommandHandler("adddeluser",    add_auto_del_user))
+    application.add_handler(CommandHandler("removedeluser", remove_auto_del_user))
+    application.add_handler(CommandHandler("listdelusers",  list_auto_del_users))
+
+    # 6) Глобальные переключатели авто-удаления
+    application.add_handler(CommandHandler("enableautodel",  enable_autodel_all))
+    application.add_handler(CommandHandler("disableautodel", disable_autodel_all))
+    application.add_handler(CommandHandler("autodelstatus",  status_autodel_all))
+
+    # 7) Удаление сообщений выбранных пользователей (после всех)
     application.add_handler(
         MessageHandler(filters.ALL, delete_user_message),
         group=99
