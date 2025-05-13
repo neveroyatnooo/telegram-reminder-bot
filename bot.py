@@ -414,10 +414,8 @@ async def list_reminders(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         chat_id = update.effective_chat.id
         uid     = update.effective_user.id
-        try:
-            await ctx.bot.delete_message(chat_id, update.message.message_id)
-        except:
-            pass
+        try: await ctx.bot.delete_message(chat_id, update.message.message_id)
+        except: pass
 
     if not await is_allowed(uid):
         msg = await ctx.bot.send_message(**with_thread({
@@ -429,11 +427,12 @@ async def list_reminders(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         schedule_deletion(msg.chat_id, msg.message_id)
         return
 
+    # вытягиваем все записи
     conn = get_conn()
     try:
         cur = conn.cursor()
         cur.execute("""
-          SELECT id,day_of_week,time,text
+          SELECT id, day_of_week, time, text
             FROM reminders
            WHERE user_id=%s AND chat_id=%s
            ORDER BY id
@@ -446,26 +445,34 @@ async def list_reminders(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not rows:
         chunks = ["Нет напоминаний."]
     else:
-        lines = [f"{r[0]}: {r[1]}, {r[2]}, {r[3]}" for r in rows]
+        # нумеруем от 1 до len(rows)
+        lines = [
+            f"{idx}: {day}, {tm}, {txt}"
+            for idx, ( _id, day, tm, txt ) in enumerate(rows, start=1)
+        ]
+
+        # дробим на чанки по 4000 символов
         chunks = []
-        current = "Напоминания:\n"
+        cur_text = "Напоминания:\n"
         MAX_LEN = 4000
         for line in lines:
-            if len(current) + len(line) + 1 > MAX_LEN:
-                chunks.append(current)
-                current = ""
-            current += line + "\n"
-        if current:
-            chunks.append(current)
+            if len(cur_text) + len(line) + 1 > MAX_LEN:
+                chunks.append(cur_text)
+                cur_text = ""
+            cur_text += line + "\n"
+        if cur_text:
+            chunks.append(cur_text)
 
+    # отправляем все чанки
     for chunk in chunks:
         msg = await ctx.bot.send_message(**with_thread({
-            "chat_id":chat_id,
-            "text":chunk,
-            "reply_markup":get_main_keyboard()
+            "chat_id": chat_id,
+            "text": chunk,
+            "reply_markup": get_main_keyboard()
         }, update))
         record_bot_message(msg.chat_id, msg.message_id)
         schedule_deletion(msg.chat_id, msg.message_id)
+
 
 async def add_user(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
@@ -851,59 +858,70 @@ async def start_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def delete_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text or ""
-    if txt not in ("Список","Помощь") and not txt.isdigit():
+    
+    if not txt.isdigit():
         msg = await ctx.bot.send_message(**with_thread({
-            "chat_id":update.effective_chat.id,
-            "text":"ID должен быть числом.",
-            "reply_markup":get_main_keyboard()
+            "chat_id": update.effective_chat.id,
+            "text": "ID должен быть числом (позиция в списке).",
+            "reply_markup": get_main_keyboard()
         }, update))
         record_bot_message(msg.chat_id, msg.message_id)
         schedule_deletion(msg.chat_id, msg.message_id)
         return DELETE_INPUT
-    if txt == "Список":
-        await list_reminders(update, ctx)
-        return ConversationHandler.END
-    if txt == "Помощь":
-        await help_cmd(update, ctx)
-        return ConversationHandler.END
 
-    rid     = int(txt)
-    uid     = update.effective_user.id
+    pos = int(txt)    
+    uid = update.effective_user.id
     chat_id = update.effective_chat.id
-    conn    = get_conn()
+
+    
+    conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT 1 FROM reminders WHERE id=%s AND user_id=%s AND chat_id=%s",
-            (rid, uid, chat_id)
-        )
-        if cur.fetchone() is None:
-            cur.close()
-            msg = await ctx.bot.send_message(**with_thread({
-                "chat_id":chat_id,
-                "text":"Не найдено.",
-                "reply_markup":get_main_keyboard()
-            }, update))
-            record_bot_message(msg.chat_id, msg.message_id)
-            schedule_deletion(msg.chat_id, msg.message_id)
-            return ConversationHandler.END
-        cur.execute("DELETE FROM reminders WHERE id=%s", (rid,))
+        cur.execute("""
+          SELECT id
+            FROM reminders
+           WHERE user_id=%s AND chat_id=%s
+           ORDER BY id
+        """, (uid, chat_id))
+        id_list = [r[0] for r in cur.fetchall()]
+        cur.close()
+    finally:
+        put_conn(conn)
+
+    
+    if pos < 1 or pos > len(id_list):
+        msg = await ctx.bot.send_message(**with_thread({
+            "chat_id": chat_id,
+            "text": "Не найдено напоминание с таким номером.",
+            "reply_markup": get_main_keyboard()
+        }, update))
+        record_bot_message(msg.chat_id, msg.message_id)
+        schedule_deletion(msg.chat_id, msg.message_id)
+        return ConversationHandler.END
+
+    real_id = id_list[pos-1]
+
+    
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM reminders WHERE id=%s", (real_id,))
         conn.commit()
         cur.close()
     finally:
         put_conn(conn)
-    try:
-        scheduler.remove_job(str(rid))
-    except:
-        pass
+    try: scheduler.remove_job(str(real_id))
+    except: pass
+
     msg = await ctx.bot.send_message(**with_thread({
-        "chat_id":chat_id,
-        "text":f"Удалено #{rid}",
-        "reply_markup":get_main_keyboard()
+        "chat_id": chat_id,
+        "text": f"Удалено напоминание #{pos}",
+        "reply_markup": get_main_keyboard()
     }, update))
     record_bot_message(msg.chat_id, msg.message_id)
     schedule_deletion(msg.chat_id, msg.message_id)
     return ConversationHandler.END
+
 
 async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.message:
