@@ -91,7 +91,7 @@ def get_conn(): return db_pool.getconn()
 def put_conn(conn): db_pool.putconn(conn)
 
 scheduler = AsyncIOScheduler()
-DELETE_DELAY_MINUTES = 1
+DELETE_DELAY_MINUTES = 59
 
 async def delete_msg(chat_id: int, message_id: int):
     try:
